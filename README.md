@@ -1,78 +1,53 @@
-# CleanroomModTemplate
-Mod development template for Cleanroom, uses a custom [Unimined fork](https://github.com/kappa-maintainer/Unimined) ([original](https://github.com/unimined/Unimined))
+# CheckPackageSize
 
-### WARNING: Custom Unimined Fork
-May have issues, report here or [here](https://github.com/kappa-maintainer/Unimined) when you encountered impossible field names or impossible Scala compiler errors. 
+面向 Minecraft 1.12.2 Cleanroom / Java 25 的网络流量诊断工具。它通过 Mixin 统计 Minecraft 应用层的包次数、编码大小和压缩后大小，用于定位整合包中的异常 Mod 与具体消息类。
 
-## DOs and DON'Ts
-### Choose Branch
-Choose mixin branch if you want to use Mixin.
+采集结果在内存中聚合并写入 HTML 报告.
 
-Use scala and kotlin branch if you want to use those languages. 
+## 运行模式
 
-There are 4 branches available:
-- main
-- mixin
-- scala
-- kotlin
+### 单机与 LAN 主机
 
-If you want to use non-main branches, after clicked *Create a new repository* under *Use this template*, check the *Include all branches* checkbox.
+按 `F8` 打开界面，选择 10、30 或 60 秒并开始采集。客户端与整合服务端在同一 JVM 中联合采集，生成：
 
-### Running Client or Server
-If you are using IntelliJ, **DO NOT** use the `Minecraft Client` configure with a blue icon. Just use the `2. Run Client` Gradle task.
+```text
+logs/checkpackagesize/<会话>/
+  report.html
+```
 
-### Adding Mod Dependencies
-You can find dependencies block in `gradle/scripts/dependencies.gradle`.
+流量是按照 Minecraft 默认 256 字节压缩阈值计算的远程理论开销.
 
-No more `rfg.deobf()` or `fg.deobf`. You **MUST** add mods by using `modImplementation` or `modRuntimeOnly`, or the game will crash when running.
+### 连接远程服务器的客户端
 
-### Non-Mod Dependencies
-Two new configuration types `contain` and `shadow` are available, check more details in `dependencies.gradle`.
+F8 只采集当前客户端，不向服务器发送控制消息，也不尝试取得服务端数据：
 
-### gradle.properties
-Edit gradle.properties and set your modid, mod version, mod name, package, etc.
+```text
+logs/checkpackagesize/<会话>/
+  report.html
+```
 
-If you are writing a coremod, remember to set related settings to true.
+### 独立服务端
 
-### Reference Class
-There will be a `Reference` class under your top package.
+由服务器控制台、RCON 或 OP 2 级用户控制：
 
-This is used to store mod version so you can fill it to `@Mod` annotation.
+```text
+/cps start 30
+/cps stop
+/cps status
+/cps report
+```
 
-You should change its location to fit your new package name.
+生成：
 
-You can find its template under `src/main/java-templates`.
+```text
+logs/checkpackagesize/<会话>/
+  report.html
+```
 
-### Mixin
-1. Rename json config file to include your modid. You will need one json per phase (`PRE_INIT`, `DEFAULT`, `MOD`) 
-2. Add your mixin classes there.
-3. Use `IMixinConfigPlugin` to control if certain mixin should be enabled. You can call `Loader.isModLoaded()` for `MOD` phase mixins.
-4. Don't worry about refmap, Unimined will handle it automatically. You can still `disableRefmap()` manually though
+服务端报告不会发送给客户端。
 
-### Access Transformer
-You **MUST** write AT file in MCP name. It will be remapped back to SRG name in artifact jar.
+## 数据边界
 
-Rename AT file name to your modid before using it. There's an example entry in AT file, remove it if you want to use AT.
-
-### Vanilla Source Code with Comments
-Run `genSources` task in gradle. If it didn't work, run again until a file with `-sources.jar` suffix appeared.
-
-If you want to `find usage` from vanilla like RFG, just change the scope in IntelliJ settings.
-
-### GitHub Action
-This template comes with three workflows.
-
-`build.yml` will build and upload artifact for every commit. Useful when you want to provide test builds for debugging.
-
-`release.yml` will make a GitHub release if you pushed a git tag.
-
-`release-to-cf-mr.yml` can publish your mod to CurseForge and/or Modrinth.
-
-You need to fill in your project IDs and configure your tokens in GitHub repository first.
-
-By default, you will need to manually trigger the workflow in web page, but you can also enable tag triggering by merging the third yml into `release.yml`.
-
-### Credit
-Thanks @Karnatour for fixing shadow plugin
-
-Thanks @ghostflyby for making kotlin branch
+- 不保存包 Payload、NBT 或聊天内容。
+- 远程流量取 Minecraft 应用层压缩帧，不包含 TCP/IP 包头和重传。
+- 快捷键可在 Minecraft 控制设置中重新绑定。

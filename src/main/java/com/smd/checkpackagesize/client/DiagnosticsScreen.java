@@ -1,9 +1,9 @@
 package com.smd.checkpackagesize.client;
 
 import com.smd.checkpackagesize.diagnostics.DiagnosticsManager;
+import com.smd.checkpackagesize.diagnostics.Endpoint;
 import com.smd.checkpackagesize.diagnostics.ReportWriter;
 import com.smd.checkpackagesize.diagnostics.TrafficReport;
-import com.smd.checkpackagesize.network.NetworkBridge;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
@@ -41,14 +41,15 @@ public final class DiagnosticsScreen extends GuiScreen {
 
     private void updateButtons() {
         boolean capturing = DiagnosticsManager.isCapturing();
+        boolean finalizing = DiagnosticsManager.isFinalizing();
         for (GuiButton button : buttonList) {
             if (button.id == 100) {
-                button.enabled = !capturing;
-                button.displayString = capturing ? "采集中" : "开始采集";
+                button.enabled = !capturing && !finalizing;
+                button.displayString = capturing ? "采集中" : finalizing ? "生成报告" : "开始采集";
             } else if (button.id == 101) {
                 button.enabled = capturing;
             } else if (button.id == 10 || button.id == 30 || button.id == 60) {
-                button.enabled = !capturing;
+                button.enabled = !capturing && !finalizing;
                 button.packedFGColour = 0;
                 button.displayString = (button.id == durationSeconds ? "● " : "") + button.id + " 秒";
             } else if (button.id == 103) {
@@ -59,19 +60,19 @@ public final class DiagnosticsScreen extends GuiScreen {
     }
 
     @Override
-    protected void actionPerformed(GuiButton button) throws IOException {
+    protected void actionPerformed(GuiButton button) {
         if (button.id == 10 || button.id == 30 || button.id == 60) {
             durationSeconds = button.id;
         } else if (button.id == 100) {
             selectedMod = null;
             boolean local = Minecraft.getMinecraft().isSingleplayer();
-            if (!NetworkBridge.startFromClient(durationSeconds, local)) {
+            if (!DiagnosticsManager.startClient(durationSeconds, local)) {
                 statusMessage = "已有采集正在运行";
             } else {
-                statusMessage = NetworkBridge.getClientStatus();
+                statusMessage = local ? "单机客户端与整合服务端正在联合采集" : "只采集当前客户端数据";
             }
         } else if (button.id == 101) {
-            NetworkBridge.stopFromClient(Minecraft.getMinecraft().isSingleplayer());
+            DiagnosticsManager.stop(Endpoint.CLIENT);
         } else if (button.id == 102) {
             if (selectedMod == null) {
                 mc.displayGuiScreen(null);
@@ -87,7 +88,6 @@ public final class DiagnosticsScreen extends GuiScreen {
     @Override
     public void updateScreen() {
         super.updateScreen();
-        if (!NetworkBridge.getClientStatus().isEmpty()) statusMessage = NetworkBridge.getClientStatus();
         updateButtons();
     }
 
@@ -102,6 +102,8 @@ public final class DiagnosticsScreen extends GuiScreen {
             drawCenteredString(fontRenderer, "正在采集：" + String.format("%.1f / %.0f 秒", elapsed / 1000.0, duration / 1000.0),
                     width / 2, 62, 0x55FF55);
             drawCenteredString(fontRenderer, statusMessage, width / 2, 76, 0xBBBBBB);
+        } else if (DiagnosticsManager.isFinalizing()) {
+            drawCenteredString(fontRenderer, "正在后台生成 HTML 报告…", width / 2, 66, 0xFFCC55);
         } else {
             TrafficReport report = DiagnosticsManager.getLastReport();
             if (report == null) {
@@ -117,11 +119,10 @@ public final class DiagnosticsScreen extends GuiScreen {
 
     private void drawModSummary(TrafficReport report) {
         rowHits.clear();
-        String source = report.localTheoretical ? "单机理论远程开销"
-                : ReportWriter.hasServerData(report) ? "客户端 + 服务端联合报告" : "仅客户端数据（没有服务端报告）";
+        String source = report.localTheoretical ? "单机客户端 + 整合服务端联合报告" : "仅当前客户端报告";
         drawCenteredString(fontRenderer, source,
                 width / 2, 64, 0xFFCC55);
-        drawHeaders("Mod", "C2S", "S2C", "编解码", "主线程", "队列最大");
+        drawHeaders("Mod", "C2S", "S2C", "包数", "编码", "压缩率");
         List<ReportWriter.ModSummary> summaries = ReportWriter.summarize(report);
         summaries.sort(Comparator.comparingLong((ReportWriter.ModSummary value) -> value.trafficBytes).reversed());
         int y = 98;
@@ -131,9 +132,9 @@ public final class DiagnosticsScreen extends GuiScreen {
             drawString(fontRenderer, trim(summary.modId, 22), 18, y, color);
             drawRight(ReportWriter.formatBytes(summary.c2sBytes), width / 2 - 92, y, color);
             drawRight(ReportWriter.formatBytes(summary.s2cBytes), width / 2 - 8, y, color);
-            drawRight(ReportWriter.formatNanos(summary.codecNanos), width / 2 + 82, y, color);
-            drawRight(ReportWriter.formatNanos(summary.mainNanos), width / 2 + 174, y, color);
-            drawRight(ReportWriter.formatNanos(summary.maxQueueNanos), width - 18, y, color);
+            drawRight(Long.toString(summary.packetCount), width / 2 + 82, y, color);
+            drawRight(ReportWriter.formatBytes(summary.encodedBytes), width / 2 + 174, y, color);
+            drawRight(ReportWriter.formatRatio(summary.encodedBytes, summary.trafficBytes), width - 18, y, color);
             rowHits.add(new RowHit(y - 2, y + 10, summary.modId));
             y += 13;
         }
@@ -147,7 +148,7 @@ public final class DiagnosticsScreen extends GuiScreen {
     private void drawPacketDetails(TrafficReport report, String modId) {
         rowHits.clear();
         drawCenteredString(fontRenderer, "Mod：" + modId, width / 2, 64, 0xFFCC55);
-        drawHeaders("方向 / 包类", "流量", "次数", "编解码", "主线程", "队列最大");
+        drawHeaders("方向 / 包类", "流量", "次数", "编码", "平均", "压缩率");
         List<TrafficReport.PacketRow> packets = new ArrayList<>();
         for (TrafficReport.PacketRow row : report.packets) {
             if (modId.equals(row.modId)) packets.add(row);
@@ -156,22 +157,20 @@ public final class DiagnosticsScreen extends GuiScreen {
         int y = 98;
         for (int index = 0; index < Math.min(12, packets.size()); index++) {
             TrafficReport.PacketRow row = packets.get(index);
-            long count = Math.max(row.client.sentCount + row.server.sentCount,
-                    row.client.receivedCount + row.server.receivedCount);
-            long codec = row.client.encodeNanos + row.client.decodeNanos + row.server.encodeNanos + row.server.decodeNanos;
-            long main = row.client.mainThreadNanos + row.server.mainThreadNanos;
-            long wait = Math.max(row.client.maxQueueWaitNanos, row.server.maxQueueWaitNanos);
+            long count = ReportWriter.packetCount(row);
+            long transferred = ReportWriter.trafficBytes(row);
+            long encoded = ReportWriter.encodedBytes(row);
             String simpleName = row.packetClass.substring(row.packetClass.lastIndexOf('.') + 1);
             int color = index == 0 ? 0xFFCC55 : 0xFFFFFF;
             drawString(fontRenderer, trim(row.direction + " " + simpleName, 32), 18, y, color);
-            drawRight(ReportWriter.formatBytes(ReportWriter.trafficBytes(row)), width / 2 - 92, y, color);
+            drawRight(ReportWriter.formatBytes(transferred), width / 2 - 92, y, color);
             drawRight(Long.toString(count), width / 2 - 8, y, color);
-            drawRight(ReportWriter.formatNanos(codec), width / 2 + 82, y, color);
-            drawRight(ReportWriter.formatNanos(main), width / 2 + 174, y, color);
-            drawRight(ReportWriter.formatNanos(wait), width - 18, y, color);
+            drawRight(ReportWriter.formatBytes(encoded), width / 2 + 82, y, color);
+            drawRight(ReportWriter.formatBytes(count == 0 ? 0 : transferred / count), width / 2 + 174, y, color);
+            drawRight(ReportWriter.formatRatio(encoded, transferred), width - 18, y, color);
             y += 13;
         }
-        drawCenteredString(fontRenderer, "完整频道、类名、Handler 和首次调用位置请查看 HTML 报告", width / 2, height - 42, 0x888888);
+        drawCenteredString(fontRenderer, "完整频道、类名、Handler 和端点流量请查看 HTML 报告", width / 2, height - 42, 0x888888);
     }
 
     private void drawHeaders(String first, String second, String third, String fourth, String fifth, String sixth) {

@@ -4,10 +4,11 @@ import net.minecraftforge.fml.relauncher.Side;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 public final class MessageRegistry {
 
-    private static final ConcurrentMap<Key, Entry> ENTRIES = new ConcurrentHashMap<>();
+    private static final ConcurrentMap<String, AtomicReferenceArray<Entry>> ENTRIES = new ConcurrentHashMap<>();
 
     private MessageRegistry() {
     }
@@ -18,12 +19,14 @@ public final class MessageRegistry {
         }
         String direction = receivingSide == Side.SERVER ? "C2S" : "S2C";
         String modId = ModResolver.resolve(messageClass);
-        ENTRIES.put(new Key(channel, discriminator), new Entry(modId, messageClass.getName(),
-                handlerClass == null ? "-" : handlerClass.getName(), direction));
+        ENTRIES.computeIfAbsent(channel, ignored -> new AtomicReferenceArray<>(256))
+                .set(discriminator & 0xFF, new Entry(modId, channel, messageClass.getName(),
+                        handlerClass == null ? "-" : handlerClass.getName(), direction));
     }
 
     public static Entry find(String channel, int discriminator) {
-        return ENTRIES.get(new Key(channel, discriminator));
+        AtomicReferenceArray<Entry> entries = ENTRIES.get(channel == null ? "" : channel);
+        return entries == null ? null : entries.get(discriminator & 0xFF);
     }
 
     public static final class Entry {
@@ -31,39 +34,20 @@ public final class MessageRegistry {
         public final String messageClass;
         public final String handlerClass;
         public final String direction;
+        private final PacketIdentity c2sIdentity;
+        private final PacketIdentity s2cIdentity;
 
-        private Entry(String modId, String messageClass, String handlerClass, String direction) {
+        private Entry(String modId, String channel, String messageClass, String handlerClass, String direction) {
             this.modId = modId;
             this.messageClass = messageClass;
             this.handlerClass = handlerClass;
             this.direction = direction;
-        }
-    }
-
-    private static final class Key {
-        private final String channel;
-        private final int discriminator;
-
-        private Key(String channel, int discriminator) {
-            this.channel = channel == null ? "" : channel;
-            this.discriminator = discriminator & 0xFF;
+            this.c2sIdentity = new PacketIdentity("C2S", modId, channel, messageClass, handlerClass);
+            this.s2cIdentity = new PacketIdentity("S2C", modId, channel, messageClass, handlerClass);
         }
 
-        @Override
-        public boolean equals(Object object) {
-            if (this == object) {
-                return true;
-            }
-            if (!(object instanceof Key)) {
-                return false;
-            }
-            Key other = (Key) object;
-            return discriminator == other.discriminator && channel.equals(other.channel);
-        }
-
-        @Override
-        public int hashCode() {
-            return 31 * channel.hashCode() + discriminator;
+        public PacketIdentity identity(String actualDirection) {
+            return "C2S".equals(actualDirection) ? c2sIdentity : s2cIdentity;
         }
     }
 }

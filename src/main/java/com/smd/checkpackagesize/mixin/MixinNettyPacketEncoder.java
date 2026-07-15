@@ -18,7 +18,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class MixinNettyPacketEncoder {
 
     @Shadow @Final private EnumPacketDirection direction;
-    @Unique private long checkPackageSize$started;
     @Unique private int checkPackageSize$writerIndex;
     @Unique private boolean checkPackageSize$active;
 
@@ -26,7 +25,6 @@ public abstract class MixinNettyPacketEncoder {
     private void checkPackageSize$begin(ChannelHandlerContext context, Packet<?> packet, ByteBuf output, CallbackInfo ci) {
         checkPackageSize$active = DiagnosticHooks.isCapturing();
         if (checkPackageSize$active) {
-            checkPackageSize$started = System.nanoTime();
             checkPackageSize$writerIndex = output.writerIndex();
         }
     }
@@ -36,8 +34,7 @@ public abstract class MixinNettyPacketEncoder {
         if (checkPackageSize$active) {
             int bytes = output.writerIndex() - checkPackageSize$writerIndex;
             boolean compressed = context.pipeline().get("compress") != null;
-            DiagnosticHooks.onEncoded(context.channel(), direction, packet, bytes,
-                    System.nanoTime() - checkPackageSize$started, compressed);
+            DiagnosticHooks.onEncoded(context.channel(), direction, packet, bytes, compressed);
             checkPackageSize$active = false;
         }
     }

@@ -2,7 +2,6 @@ package com.smd.checkpackagesize.mixin;
 
 import com.smd.checkpackagesize.diagnostics.DiagnosticHooks;
 import io.netty.channel.Channel;
-import io.netty.channel.ChannelHandlerContext;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
 import net.minecraft.network.EnumConnectionState;
@@ -35,22 +34,9 @@ public abstract class MixinNetworkManager {
         checkPackageSize$captureQueued(packet);
     }
 
-    @Inject(method = "channelRead0(Lio/netty/channel/ChannelHandlerContext;Lnet/minecraft/network/Packet;)V", at = @At("HEAD"))
-    private void checkPackageSize$beginInbound(ChannelHandlerContext context, Packet<?> packet, CallbackInfo ci) {
-        DiagnosticHooks.beginInbound(packet, direction);
-    }
-
-    @Inject(method = "channelRead0(Lio/netty/channel/ChannelHandlerContext;Lnet/minecraft/network/Packet;)V", at = @At("RETURN"))
-    private void checkPackageSize$endInbound(ChannelHandlerContext context, Packet<?> packet, CallbackInfo ci) {
-        DiagnosticHooks.endInbound();
-    }
-
     private void checkPackageSize$captureQueued(Packet<?> packet) {
-        if (!DiagnosticHooks.isCapturing()) {
-            return;
-        }
-        boolean local = channel != null && ((NetworkManager) (Object) this).isLocalChannel();
-        EnumConnectionState state = channel == null ? null : channel.attr(NetworkManager.PROTOCOL_ATTRIBUTE_KEY).get();
-        DiagnosticHooks.onPacketQueued(packet, direction, local, state);
+        if (channel == null || !((NetworkManager) (Object) this).isLocalChannel() || !DiagnosticHooks.isCapturing()) return;
+        EnumConnectionState state = channel.attr(NetworkManager.PROTOCOL_ATTRIBUTE_KEY).get();
+        DiagnosticHooks.onLocalPacket(packet, direction, state);
     }
 }

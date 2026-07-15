@@ -2,6 +2,7 @@ package com.smd.checkpackagesize.client;
 
 import com.smd.checkpackagesize.Reference;
 import com.smd.checkpackagesize.diagnostics.DiagnosticsManager;
+import com.smd.checkpackagesize.diagnostics.Endpoint;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraftforge.common.MinecraftForge;
@@ -36,7 +37,7 @@ public final class ClientDiagnostics {
     @SubscribeEvent
     public void onClientTick(TickEvent.ClientTickEvent event) {
         if (event.phase == TickEvent.Phase.END) {
-            DiagnosticsManager.tick();
+            DiagnosticsManager.tick(Endpoint.CLIENT);
         }
     }
 }

@@ -1,13 +1,11 @@
 package com.smd.checkpackagesize;
 
-import com.smd.checkpackagesize.diagnostics.DiagnosticsManager;
-import com.smd.checkpackagesize.network.NetworkBridge;
 import com.smd.checkpackagesize.proxy.IProxy;
-import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.SidedProxy;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
+import net.minecraftforge.fml.common.event.FMLServerStartingEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -25,21 +23,17 @@ public class CheckPackageSize {
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
-        DiagnosticsManager.initialize(event.getModConfigurationDirectory().getParentFile());
-        NetworkBridge.initialize();
-        MinecraftForge.EVENT_BUS.register(new CommonEvents());
+        proxy.preInit(event);
     }
 
     @Mod.EventHandler
     public void init(FMLInitializationEvent event) {
-        if (event.getSide().isClient()) {
-            try {
-                Class.forName("com.smd.checkpackagesize.client.ClientDiagnostics")
-                        .getMethod("initialize").invoke(null);
-            } catch (ReflectiveOperationException exception) {
-                throw new RuntimeException("Unable to initialize client diagnostics", exception);
-            }
-        }
+        proxy.init(event);
+    }
+
+    @Mod.EventHandler
+    public void serverStarting(FMLServerStartingEvent event) {
+        proxy.serverStarting(event);
     }
 
 }

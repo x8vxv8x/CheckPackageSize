@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 @IFMLLoadingPlugin.MCVersion("1.12.2")
-@IFMLLoadingPlugin.Name("TooManyTinkersCore")
+@IFMLLoadingPlugin.Name("CheckPackageSizeCore")
 public class MixinCore implements IFMLLoadingPlugin, IEarlyMixinLoader {
     @Override
     public @Nullable String[] getASMTransformerClass() {

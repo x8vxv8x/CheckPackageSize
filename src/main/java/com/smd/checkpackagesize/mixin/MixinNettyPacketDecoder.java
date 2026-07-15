@@ -20,7 +20,6 @@ import java.util.List;
 public abstract class MixinNettyPacketDecoder {
 
     @Shadow @Final private EnumPacketDirection direction;
-    @Unique private long checkPackageSize$started;
     @Unique private int checkPackageSize$bytes;
     @Unique private int checkPackageSize$outputSize;
     @Unique private boolean checkPackageSize$active;
@@ -29,7 +28,6 @@ public abstract class MixinNettyPacketDecoder {
     private void checkPackageSize$begin(ChannelHandlerContext context, ByteBuf input, List<Object> output, CallbackInfo ci) {
         checkPackageSize$active = DiagnosticHooks.isCapturing() && input.readableBytes() > 0;
         if (checkPackageSize$active) {
-            checkPackageSize$started = System.nanoTime();
             checkPackageSize$bytes = input.readableBytes();
             checkPackageSize$outputSize = output.size();
         }
@@ -40,13 +38,12 @@ public abstract class MixinNettyPacketDecoder {
         if (!checkPackageSize$active) {
             return;
         }
-        long elapsed = System.nanoTime() - checkPackageSize$started;
         boolean compressed = context.pipeline().get("decompress") != null;
         for (int index = checkPackageSize$outputSize; index < output.size(); index++) {
             Object value = output.get(index);
             if (value instanceof Packet) {
                 DiagnosticHooks.onDecoded(context.channel(), direction, (Packet<?>) value,
-                        checkPackageSize$bytes, elapsed, compressed);
+                        checkPackageSize$bytes, compressed);
             }
         }
         checkPackageSize$active = false;

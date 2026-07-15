@@ -5,7 +5,24 @@ import net.minecraft.network.EnumPacketDirection;
 import net.minecraft.network.Packet;
 import net.minecraftforge.fml.common.network.internal.FMLProxyPacket;
 
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicReferenceArray;
+
 public final class PacketResolver {
+
+    private static final ClassValue<PacketIdentity[]> VANILLA_IDENTITIES = new ClassValue<>() {
+        @Override
+        protected PacketIdentity[] computeValue(Class<?> type) {
+            String modId = ModResolver.resolve(type);
+            String className = type.getName();
+            return new PacketIdentity[] {
+                    new PacketIdentity("C2S", modId, "-", className, "-"),
+                    new PacketIdentity("S2C", modId, "-", className, "-")
+            };
+        }
+    };
+    private static final ConcurrentMap<String, AtomicReferenceArray<PacketIdentity>> UNKNOWN_FORGE = new ConcurrentHashMap<>();
 
     private PacketResolver() {
     }
@@ -18,13 +35,20 @@ public final class PacketResolver {
             int discriminator = readDiscriminator(proxy.payload());
             MessageRegistry.Entry entry = MessageRegistry.find(channel, discriminator);
             if (entry != null) {
-                return new PacketIdentity(directionName, entry.modId, channel, entry.messageClass, entry.handlerClass);
+                return entry.identity(directionName);
             }
-            String modId = channel == null || channel.isEmpty() ? "forge" : channel;
-            return new PacketIdentity(directionName, modId, channel, packet.getClass().getName(), "-");
+            String channelName = channel == null ? "" : channel;
+            AtomicReferenceArray<PacketIdentity> identities = UNKNOWN_FORGE.computeIfAbsent(channelName,
+                    ignored -> new AtomicReferenceArray<>(512));
+            int slot = (discriminator & 0xFF) * 2 + (direction == EnumPacketDirection.SERVERBOUND ? 0 : 1);
+            PacketIdentity identity = identities.get(slot);
+            if (identity != null) return identity;
+            String modId = channelName.isEmpty() ? "forge" : channelName;
+            PacketIdentity created = new PacketIdentity(directionName, modId, channelName, packet.getClass().getName(), "-");
+            if (identities.compareAndSet(slot, null, created)) return created;
+            return identities.get(slot);
         }
-        return new PacketIdentity(directionName, ModResolver.resolve(packet.getClass()), "-",
-                packet.getClass().getName(), "-");
+        return VANILLA_IDENTITIES.get(packet.getClass())[direction == EnumPacketDirection.SERVERBOUND ? 0 : 1];
     }
 
     private static int readDiscriminator(ByteBuf payload) {
