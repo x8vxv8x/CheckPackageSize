@@ -19,7 +19,7 @@ public final class ReportWriter {
     private ReportWriter() {
     }
 
-    public static File createSessionDirectory(File gameDirectory, long startedAtMillis, long sessionId) throws Exception {
+    public static File createSessionDirectory(File gameDirectory, long startedAtMillis, long sessionId) {
         File root = new File(new File(gameDirectory, "logs"), "checkpackagesize");
         File directory = new File(root, new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.ROOT)
                 .format(new Date(startedAtMillis)) + "_" + sessionId);
@@ -43,6 +43,8 @@ public final class ReportWriter {
                 .append(".card{background:white;border:1px solid #ddd;border-radius:8px;padding:16px;margin:14px 0}")
                 .append("table{width:100%;border-collapse:collapse;background:white}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}")
                 .append("th{background:#eef1f4}code{font-size:12px}details{margin:10px 0}.warn{color:#a14d00}")
+                .append(".timeline{height:120px;display:flex;align-items:flex-end;gap:1px;background:#eef1f4;padding:8px}")
+                .append(".bar{flex:1;min-width:2px;display:flex;flex-direction:column;justify-content:flex-end}.c2s{background:#f59e42}.s2c{background:#4ca6ff}")
                 .append("</style></head><body><h1>CheckPackageSize 网络诊断报告</h1><div class=\"card\">")
                 .append("模式：").append(escape(report.mode)).append("<br>")
                 .append("采集时长：").append(formatDuration(report.durationMillis)).append("<br>")
@@ -54,12 +56,34 @@ public final class ReportWriter {
         if (!mods.isEmpty()) {
             ModSummary traffic = max(mods, Comparator.comparingLong(value -> value.trafficBytes));
             ModSummary frequent = max(mods, Comparator.comparingLong(value -> value.packetCount));
+            long totalTraffic = mods.stream().mapToLong(value -> value.trafficBytes).sum();
+            long totalEncoded = mods.stream().mapToLong(value -> value.encodedBytes).sum();
+            long totalPackets = mods.stream().mapToLong(value -> value.packetCount).sum();
             builder.append("<div class=\"card\"><h2>直接结论</h2>")
+                    .append("总流量：<b>").append(formatBytes(totalTraffic)).append("</b>，平均 ")
+                    .append(formatRate(report.durationMillis == 0 ? 0L : totalTraffic * 1000L / report.durationMillis))
+                    .append("，峰值 ").append(formatRate(peakBytes(report))).append("。<br>")
+                    .append("总包数：").append(totalPackets).append("，峰值 ").append(peakPackets(report)).append(" packets/s，压缩后占比 ")
+                    .append(formatRatio(totalEncoded, totalTraffic)).append("。<br>")
                     .append("流量最高：<b>").append(escape(traffic.modId)).append("</b>，")
                     .append(formatBytes(traffic.trafficBytes)).append("。<br>")
                     .append("包数量最高：<b>").append(escape(frequent.modId)).append("</b>，")
                     .append(frequent.packetCount).append(" 个。")
                     .append("<p>本报告只统计 Minecraft 应用层流量，不测量编解码、发送队列或主线程处理时间。</p></div>");
+        }
+
+        if (!report.timeline.isEmpty()) {
+            long peak = Math.max(1L, peakBytes(report));
+            builder.append("<h2>最近 60 秒</h2><div class=\"timeline\">");
+            for (TrafficReport.TimeBucket bucket : report.timeline) {
+                int c2sHeight = (int) Math.round(bucket.c2sBytes * 100.0 / peak);
+                int s2cHeight = (int) Math.round(bucket.s2cBytes * 100.0 / peak);
+                builder.append("<div class=\"bar\" title=\"").append(bucket.second).append("s · C2S ")
+                        .append(escape(formatBytes(bucket.c2sBytes))).append(" · S2C ").append(escape(formatBytes(bucket.s2cBytes)))
+                        .append("\"><span class=\"s2c\" style=\"height:").append(s2cHeight).append("%\"></span>")
+                        .append("<span class=\"c2s\" style=\"height:").append(c2sHeight).append("%\"></span></div>");
+            }
+            builder.append("</div><p>C2S 为橙色，S2C 为蓝色；每列代表 1 秒。</p>");
         }
 
         builder.append("<h2>Mod 汇总</h2><table><tr><th>Mod</th><th>C2S</th><th>S2C</th><th>包数</th><th>编码大小</th><th>压缩率</th><th>主要包</th></tr>");
@@ -83,6 +107,7 @@ public final class ReportWriter {
                     .append(escape(row.direction)).append(" · <code>").append(escape(row.packetClass)).append("</code> · ")
                     .append(formatBytes(trafficBytes(row))).append("</summary><div class=\"card\">")
                     .append("频道：<code>").append(escape(row.channel)).append("</code><br>")
+                    .append("Discriminator：").append(row.discriminator < 0 ? "-" : row.discriminator).append("<br>")
                     .append("处理器：<code>").append(escape(row.handlerClass)).append("</code><br>")
                     .append("发送/接收次数：").append(count).append("<br>")
                     .append("编码大小：").append(formatBytes(encoded)).append("<br>")
@@ -102,12 +127,21 @@ public final class ReportWriter {
         for (TrafficReport.PacketRow row : report.packets) {
             ModSummary summary = result.computeIfAbsent(row.modId, ModSummary::new);
             long bytes = trafficBytes(row);
+            long encoded = encodedBytes(row);
             long count = packetCount(row);
             summary.trafficBytes += bytes;
-            summary.encodedBytes += encodedBytes(row);
+            summary.encodedBytes += encoded;
             summary.packetCount += count;
-            if ("C2S".equals(row.direction)) summary.c2sBytes += bytes;
-            if ("S2C".equals(row.direction)) summary.s2cBytes += bytes;
+            if ("C2S".equals(row.direction)) {
+                summary.c2sBytes += bytes;
+                summary.c2sEncodedBytes += encoded;
+                summary.c2sPackets += count;
+            }
+            if ("S2C".equals(row.direction)) {
+                summary.s2cBytes += bytes;
+                summary.s2cEncodedBytes += encoded;
+                summary.s2cPackets += count;
+            }
             String key = row.modId + '\0' + row.packetClass;
             long packetBytes = topPacketBytes.getOrDefault(key, 0L) + bytes;
             topPacketBytes.put(key, packetBytes);
@@ -144,9 +178,25 @@ public final class ReportWriter {
         return String.format(Locale.ROOT, "%.2f MiB", bytes / (1024.0 * 1024.0));
     }
 
+    public static String formatRate(long bytesPerSecond) {
+        return formatBytes(bytesPerSecond) + "/s";
+    }
+
     public static String formatRatio(long encoded, long transferred) {
         if (encoded <= 0L) return "-";
         return String.format(Locale.ROOT, "%.1f%%", transferred * 100.0 / encoded);
+    }
+
+    private static long peakBytes(TrafficReport report) {
+        long peak = 0L;
+        for (TrafficReport.TimeBucket bucket : report.timeline) peak = Math.max(peak, bucket.c2sBytes + bucket.s2cBytes);
+        return peak;
+    }
+
+    private static long peakPackets(TrafficReport report) {
+        long peak = 0L;
+        for (TrafficReport.TimeBucket bucket : report.timeline) peak = Math.max(peak, bucket.c2sPackets + bucket.s2cPackets);
+        return peak;
     }
 
     private static String endpointDetail(String name, TrafficReport.EndpointMetrics metrics) {
@@ -178,7 +228,7 @@ public final class ReportWriter {
     }
 
     private static <T> T max(List<T> values, Comparator<T> comparator) {
-        T result = values.get(0);
+        T result = values.getFirst();
         for (int index = 1; index < values.size(); index++) {
             if (comparator.compare(values.get(index), result) > 0) result = values.get(index);
         }
@@ -192,6 +242,10 @@ public final class ReportWriter {
         public long trafficBytes;
         public long encodedBytes;
         public long packetCount;
+        public long c2sEncodedBytes;
+        public long s2cEncodedBytes;
+        public long c2sPackets;
+        public long s2cPackets;
         public String topPacket = "-";
         long topPacketBytes;
 

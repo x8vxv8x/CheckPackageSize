@@ -3,11 +3,9 @@ package com.smd.checkpackagesize.diagnostics;
 import io.netty.buffer.ByteBuf;
 import net.minecraft.network.EnumPacketDirection;
 import net.minecraft.network.Packet;
+import net.minecraft.network.play.client.CPacketCustomPayload;
+import net.minecraft.network.play.server.SPacketCustomPayload;
 import net.minecraftforge.fml.common.network.internal.FMLProxyPacket;
-
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicReferenceArray;
 
 public final class PacketResolver {
 
@@ -22,33 +20,23 @@ public final class PacketResolver {
             };
         }
     };
-    private static final ConcurrentMap<String, AtomicReferenceArray<PacketIdentity>> UNKNOWN_FORGE = new ConcurrentHashMap<>();
-
     private PacketResolver() {
     }
 
     public static PacketIdentity resolve(Packet<?> packet, EnumPacketDirection direction) {
         String directionName = direction == EnumPacketDirection.SERVERBOUND ? "C2S" : "S2C";
-        if (packet instanceof FMLProxyPacket) {
-            FMLProxyPacket proxy = (FMLProxyPacket) packet;
-            String channel = proxy.channel();
-            int discriminator = readDiscriminator(proxy.payload());
-            MessageRegistry.Entry entry = MessageRegistry.find(channel, discriminator);
-            if (entry != null) {
-                return entry.identity(directionName);
-            }
-            String channelName = channel == null ? "" : channel;
-            AtomicReferenceArray<PacketIdentity> identities = UNKNOWN_FORGE.computeIfAbsent(channelName,
-                    ignored -> new AtomicReferenceArray<>(512));
-            int slot = (discriminator & 0xFF) * 2 + (direction == EnumPacketDirection.SERVERBOUND ? 0 : 1);
-            PacketIdentity identity = identities.get(slot);
-            if (identity != null) return identity;
-            String modId = channelName.isEmpty() ? "forge" : channelName;
-            PacketIdentity created = new PacketIdentity(directionName, modId, channelName, packet.getClass().getName(), "-");
-            if (identities.compareAndSet(slot, null, created)) return created;
-            return identities.get(slot);
-        }
+        if (packet instanceof FMLProxyPacket proxy)
+            return resolveForgePayload(proxy.channel(), proxy.payload(), directionName);
+        if (packet instanceof CPacketCustomPayload payload)
+            return resolveForgePayload(payload.getChannelName(), payload.getBufferData(), directionName);
+        if (packet instanceof SPacketCustomPayload payload)
+            return resolveForgePayload(payload.getChannelName(), payload.getBufferData(), directionName);
         return VANILLA_IDENTITIES.get(packet.getClass())[direction == EnumPacketDirection.SERVERBOUND ? 0 : 1];
+    }
+
+    private static PacketIdentity resolveForgePayload(String channel, ByteBuf payload, String direction) {
+        int discriminator = MessageRegistry.hasChannel(channel) ? readDiscriminator(payload) : -1;
+        return ForgeIdentityResolver.resolve(channel, discriminator, direction);
     }
 
     private static int readDiscriminator(ByteBuf payload) {

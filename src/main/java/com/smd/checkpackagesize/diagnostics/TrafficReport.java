@@ -9,9 +9,20 @@ public class TrafficReport {
     public long startedAtMillis;
     public long durationMillis;
     public boolean localTheoretical;
+    public boolean capturing;
     public long droppedMeasurements;
+    public int pendingLocalMeasurements;
     public String reportDirectory;
     public List<PacketRow> packets = new ArrayList<>();
+    public List<TimeBucket> timeline = new ArrayList<>();
+
+    public static class TimeBucket {
+        public int second;
+        public long c2sBytes;
+        public long s2cBytes;
+        public long c2sPackets;
+        public long s2cPackets;
+    }
 
     public static class PacketRow {
         public String direction;
@@ -19,6 +30,7 @@ public class TrafficReport {
         public String channel;
         public String packetClass;
         public String handlerClass;
+        public int discriminator = -1;
         public EndpointMetrics client = new EndpointMetrics();
         public EndpointMetrics server = new EndpointMetrics();
     }

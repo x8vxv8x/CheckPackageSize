@@ -7,8 +7,10 @@ import net.minecraft.network.EnumConnectionState;
 import net.minecraft.network.EnumPacketDirection;
 import net.minecraft.network.Packet;
 import net.minecraft.network.PacketBuffer;
+import net.minecraft.network.play.client.CPacketCustomPayload;
 import net.minecraftforge.fml.common.network.internal.FMLProxyPacket;
 
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -46,8 +48,9 @@ public final class DiagnosticHooks {
         }
 
         PacketIdentity identity = PacketResolver.resolve(packet, outbound);
-        byte[] data = encodeLocal(packet, state, outbound);
-        if (data == null) {
+        long timelineSecond = session.currentSecond();
+        byte[][] frames = encodeLocalFrames(packet, state, outbound);
+        if (frames == null) {
             session.dropped.increment();
             return;
         }
@@ -55,21 +58,20 @@ public final class DiagnosticHooks {
         session.packet(identity).endpoint(sender).sentCount.increment();
         session.pendingAsync.incrementAndGet();
         try {
-            LOCAL_WORKER.execute(() -> finishLocalTraffic(session, identity, sender, data));
+            LOCAL_WORKER.execute(() -> finishLocalTraffic(session, identity, sender, timelineSecond, frames));
         } catch (RejectedExecutionException exception) {
             session.pendingAsync.decrementAndGet();
             session.dropped.increment();
         }
     }
 
-    public static void onEncoded(Channel channel, EnumPacketDirection direction, Packet<?> packet, int encodedBytes,
+    public static void onEncoded(Channel channel, EnumPacketDirection direction, PacketIdentity identity, int encodedBytes,
                                  boolean compressionEnabled) {
-        if (packet == null || encodedBytes < 0) return;
+        if (identity == null || encodedBytes < 0) return;
         Endpoint endpoint = endpointForOutbound(direction);
         DiagnosticsManager.Session session = DiagnosticsManager.session(endpoint);
         if (session == null) return;
 
-        PacketIdentity identity = PacketResolver.resolve(packet, direction);
         int framedBytes = PacketResolver.framedSize(encodedBytes);
         session.packet(identity).endpoint(endpoint).sentCount.increment();
         if (compressionEnabled) {
@@ -98,7 +100,7 @@ public final class DiagnosticHooks {
             DiagnosticsManager.Session session = DiagnosticsManager.session(endpoint);
             if (session != null) {
                 session.inboundCompression.computeIfAbsent(channel, ignored -> new DiagnosticsManager.LongQueue())
-                        .add((long) PacketResolver.framedSize(bytes));
+                        .add(PacketResolver.framedSize(bytes));
                 return;
             }
         }
@@ -123,41 +125,56 @@ public final class DiagnosticHooks {
         }
     }
 
-    private static byte[] encodeLocal(Packet<?> packet, EnumConnectionState state, EnumPacketDirection direction) {
+    private static byte[][] encodeLocalFrames(Packet<?> packet, EnumConnectionState state, EnumPacketDirection direction) {
         try {
-            Integer packetId = state.getPacketId(direction, packet);
-            if (packetId == null) return null;
             if (packet instanceof FMLProxyPacket proxy && proxy.payload() != null) {
-                ByteBuf payload = proxy.payload();
-                int idBytes = varIntSize(packetId);
-                byte[] data = new byte[idBytes + payload.readableBytes()];
-                writeVarInt(data, 0, packetId);
-                payload.getBytes(payload.readerIndex(), data, idBytes, payload.readableBytes());
-                return data;
+                if (direction == EnumPacketDirection.SERVERBOUND) {
+                    PacketBuffer payload = new PacketBuffer(proxy.payload().duplicate());
+                    byte[] encoded = encodeVanillaPacket(new CPacketCustomPayload(proxy.channel(), payload), state, direction);
+                    return encoded == null ? null : new byte[][] { encoded };
+                }
+                List<? extends Packet<?>> packets = proxy.copy().toS3FPackets();
+                byte[][] frames = new byte[packets.size()][];
+                for (int index = 0; index < packets.size(); index++) {
+                    frames[index] = encodeVanillaPacket(packets.get(index), state, direction);
+                    if (frames[index] == null) return null;
+                }
+                return frames;
             }
-
-            ByteBuf buffer = Unpooled.buffer();
-            try {
-                PacketBuffer packetBuffer = new PacketBuffer(buffer);
-                packetBuffer.writeVarInt(packetId);
-                packet.writePacketData(packetBuffer);
-                byte[] data = new byte[buffer.readableBytes()];
-                buffer.getBytes(buffer.readerIndex(), data);
-                return data;
-            } finally {
-                buffer.release();
-            }
+            byte[] encoded = encodeVanillaPacket(packet, state, direction);
+            return encoded == null ? null : new byte[][] { encoded };
         } catch (Throwable ignored) {
             return null;
         }
     }
 
-    private static void finishLocalTraffic(DiagnosticsManager.Session session, PacketIdentity identity, Endpoint sender,
-                                           byte[] data) {
+    private static byte[] encodeVanillaPacket(Packet<?> packet, EnumConnectionState state,
+                                              EnumPacketDirection direction) throws Exception {
+        Integer packetId = state.getPacketId(direction, packet);
+        if (packetId == null) return null;
+        ByteBuf buffer = Unpooled.buffer();
         try {
-            int encodedBytes = PacketResolver.framedSize(data.length);
-            int transferredBytes = compressedFrameSize(data, THEORETICAL_COMPRESSION_THRESHOLD);
-            session.recordLocalWire(sender, identity, encodedBytes, transferredBytes);
+            PacketBuffer packetBuffer = new PacketBuffer(buffer);
+            packetBuffer.writeVarInt(packetId);
+            packet.writePacketData(packetBuffer);
+            byte[] data = new byte[buffer.readableBytes()];
+            buffer.getBytes(buffer.readerIndex(), data);
+            return data;
+        } finally {
+            buffer.release();
+        }
+    }
+
+    private static void finishLocalTraffic(DiagnosticsManager.Session session, PacketIdentity identity, Endpoint sender,
+                                           long timelineSecond, byte[][] frames) {
+        try {
+            long encodedBytes = 0L;
+            long transferredBytes = 0L;
+            for (byte[] frame : frames) {
+                encodedBytes += PacketResolver.framedSize(frame.length);
+                transferredBytes += compressedFrameSize(frame, THEORETICAL_COMPRESSION_THRESHOLD);
+            }
+            session.recordLocalWire(sender, identity, encodedBytes, transferredBytes, timelineSecond);
         } catch (Throwable ignored) {
             session.dropped.increment();
         } finally {
@@ -177,15 +194,6 @@ public final class DiagnosticHooks {
             compressed += deflater.deflate(output);
         }
         return PacketResolver.framedSize(varIntSize(data.length) + compressed);
-    }
-
-    private static void writeVarInt(byte[] target, int offset, int value) {
-        int index = offset;
-        while ((value & -128) != 0) {
-            target[index++] = (byte) (value & 127 | 128);
-            value >>>= 7;
-        }
-        target[index] = (byte) value;
     }
 
     private static int varIntSize(int value) {

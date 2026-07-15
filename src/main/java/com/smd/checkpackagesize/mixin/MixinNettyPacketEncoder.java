@@ -1,6 +1,8 @@
 package com.smd.checkpackagesize.mixin;
 
 import com.smd.checkpackagesize.diagnostics.DiagnosticHooks;
+import com.smd.checkpackagesize.diagnostics.PacketIdentity;
+import com.smd.checkpackagesize.diagnostics.PacketResolver;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import net.minecraft.network.EnumPacketDirection;
@@ -19,6 +21,7 @@ public abstract class MixinNettyPacketEncoder {
 
     @Shadow @Final private EnumPacketDirection direction;
     @Unique private int checkPackageSize$writerIndex;
+    @Unique private PacketIdentity checkPackageSize$identity;
     @Unique private boolean checkPackageSize$active;
 
     @Inject(method = "encode", at = @At("HEAD"))
@@ -26,6 +29,7 @@ public abstract class MixinNettyPacketEncoder {
         checkPackageSize$active = DiagnosticHooks.isCapturing();
         if (checkPackageSize$active) {
             checkPackageSize$writerIndex = output.writerIndex();
+            checkPackageSize$identity = PacketResolver.resolve(packet, direction);
         }
     }
 
@@ -34,7 +38,8 @@ public abstract class MixinNettyPacketEncoder {
         if (checkPackageSize$active) {
             int bytes = output.writerIndex() - checkPackageSize$writerIndex;
             boolean compressed = context.pipeline().get("compress") != null;
-            DiagnosticHooks.onEncoded(context.channel(), direction, packet, bytes, compressed);
+            DiagnosticHooks.onEncoded(context.channel(), direction, checkPackageSize$identity, bytes, compressed);
+            checkPackageSize$identity = null;
             checkPackageSize$active = false;
         }
     }

@@ -1,14 +1,16 @@
 package com.smd.checkpackagesize;
 
 import net.minecraftforge.fml.relauncher.IFMLLoadingPlugin;
+import net.minecraftforge.fml.relauncher.IFMLLoadingPlugin.MCVersion;
+import net.minecraftforge.fml.relauncher.IFMLLoadingPlugin.Name;
 import zone.rong.mixinbooter.IEarlyMixinLoader;
 
 import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Map;
 
-@IFMLLoadingPlugin.MCVersion("1.12.2")
-@IFMLLoadingPlugin.Name("CheckPackageSizeCore")
+@MCVersion("1.12.2")
+@Name("CheckPackageSizeCore")
 public class MixinCore implements IFMLLoadingPlugin, IEarlyMixinLoader {
     @Override
     public @Nullable String[] getASMTransformerClass() {

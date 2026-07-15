@@ -42,7 +42,7 @@ public final class DiagnosticsManager {
 
     private static boolean start(CaptureMode mode, int durationSeconds) {
         if ((active != null && !active.isFinished()) || FINALIZING.get() > 0) return false;
-        int seconds = Math.max(1, Math.min(300, durationSeconds));
+        int seconds = Math.clamp(durationSeconds, 1, 300);
         try {
             active = new Session(NEXT_ID.incrementAndGet(), mode, seconds, gameDirectory);
             COMPLETED.set(null);
@@ -115,6 +115,11 @@ public final class DiagnosticsManager {
         return lastReport;
     }
 
+    public static TrafficReport getLiveReport() {
+        Session session = active;
+        return session == null ? null : session.snapshot();
+    }
+
     public static TrafficReport pollCompleted() {
         return COMPLETED.getAndSet(null);
     }
@@ -136,6 +141,7 @@ public final class DiagnosticsManager {
         final ConcurrentMap<Channel, LongQueue> inboundCompression = new ConcurrentHashMap<>();
         final AtomicInteger pendingAsync = new AtomicInteger();
         final LongAdder dropped = new LongAdder();
+        final TimeBucket[] timeline = new TimeBucket[60];
         volatile boolean accepting = true;
         volatile boolean sealed;
         volatile long stopRequestedNanos;
@@ -147,6 +153,7 @@ public final class DiagnosticsManager {
             this.startNanos = System.nanoTime();
             this.durationNanos = durationSeconds * 1_000_000_000L;
             this.reportDirectory = ReportWriter.createSessionDirectory(gameDirectory, startMillis, id);
+            for (int index = 0; index < timeline.length; index++) timeline[index] = new TimeBucket();
         }
 
         void tick() {
@@ -190,16 +197,22 @@ public final class DiagnosticsManager {
             MutableEndpoint metrics = packet(identity).endpoint(endpoint);
             metrics.encodedBytes.add(encodedBytes);
             metrics.transferredBytes.add(transferredBytes);
+            recordTimeline(identity.direction(), transferredBytes);
         }
 
         void recordReceivedWire(Endpoint endpoint, PacketIdentity identity, long encodedBytes, long transferredBytes) {
             MutableEndpoint metrics = packet(identity).endpoint(endpoint);
             metrics.receivedBytes.add(encodedBytes);
             metrics.transferredBytes.add(transferredBytes);
+            recordTimeline(identity.direction(), transferredBytes);
         }
 
-        void recordLocalWire(Endpoint sender, PacketIdentity identity, long encodedBytes, long transferredBytes) {
-            recordSentWire(sender, identity, encodedBytes, transferredBytes);
+        void recordLocalWire(Endpoint sender, PacketIdentity identity, long encodedBytes, long transferredBytes,
+                             long timelineSecond) {
+            MutableEndpoint sent = packet(identity).endpoint(sender);
+            sent.encodedBytes.add(encodedBytes);
+            sent.transferredBytes.add(transferredBytes);
+            recordTimeline(timelineSecond, identity.direction(), transferredBytes);
             Endpoint receiver = sender == Endpoint.CLIENT ? Endpoint.SERVER : Endpoint.CLIENT;
             MutableEndpoint received = packet(identity).endpoint(receiver);
             received.receivedCount.increment();
@@ -212,16 +225,43 @@ public final class DiagnosticsManager {
             report.sessionId = id;
             report.mode = mode.name();
             report.startedAtMillis = startMillis;
-            report.durationMillis = Math.min(durationNanos, Math.max(0L, System.nanoTime() - startNanos)) / 1_000_000L;
+            long endNanos = stopRequestedNanos == 0L ? System.nanoTime() : stopRequestedNanos;
+            report.durationMillis = Math.clamp(endNanos - startNanos, 0L, durationNanos) / 1_000_000L;
             report.localTheoretical = mode.localTheoretical();
+            report.capturing = accepting;
             report.reportDirectory = reportDirectory.getAbsolutePath();
             report.droppedMeasurements = dropped.sum();
+            report.pendingLocalMeasurements = pendingAsync.get();
             ArrayList<MutablePacket> sorted = new ArrayList<>(packets.values());
             sorted.sort(Comparator.comparing(value -> value.identity.modId() + value.identity.packetClass() + value.identity.direction()));
             for (MutablePacket packet : sorted) {
                 if (!"checkpackagesize".equals(packet.identity.modId())) report.packets.add(packet.snapshot());
             }
+            snapshotTimeline(report);
             return report;
+        }
+
+        private void recordTimeline(String direction, long bytes) {
+            recordTimeline(currentSecond(), direction, bytes);
+        }
+
+        private void recordTimeline(long second, String direction, long bytes) {
+            timeline[(int) (second % timeline.length)].add(second, "C2S".equals(direction), bytes);
+        }
+
+        private void snapshotTimeline(TrafficReport report) {
+            long current = currentSecond();
+            long first = Math.max(0L, current - timeline.length + 1L);
+            for (long second = first; second <= current; second++) {
+                TimeBucket bucket = timeline[(int) (second % timeline.length)];
+                report.timeline.add(bucket.snapshot((int) second));
+            }
+        }
+
+        long currentSecond() {
+            long endNanos = stopRequestedNanos == 0L ? System.nanoTime() : stopRequestedNanos;
+            long elapsed = Math.max(1L, endNanos - startNanos);
+            return (elapsed - 1L) / 1_000_000_000L;
         }
 
     }
@@ -241,6 +281,7 @@ public final class DiagnosticsManager {
             row.channel = identity.channel();
             row.packetClass = identity.packetClass();
             row.handlerClass = identity.handlerClass();
+            row.discriminator = identity.discriminator();
             row.client = client.snapshot();
             row.server = server.snapshot();
             return row;
@@ -262,6 +303,49 @@ public final class DiagnosticsManager {
             metrics.receivedBytes = receivedBytes.sum();
             metrics.transferredBytes = transferredBytes.sum();
             return metrics;
+        }
+    }
+
+    static final class TimeBucket {
+        private volatile long second = -1L;
+        private final AtomicLong c2sBytes = new AtomicLong();
+        private final AtomicLong s2cBytes = new AtomicLong();
+        private final AtomicLong c2sPackets = new AtomicLong();
+        private final AtomicLong s2cPackets = new AtomicLong();
+
+        void add(long targetSecond, boolean c2s, long bytes) {
+            ensureSecond(targetSecond);
+            if (c2s) {
+                c2sBytes.addAndGet(bytes);
+                c2sPackets.incrementAndGet();
+            } else {
+                s2cBytes.addAndGet(bytes);
+                s2cPackets.incrementAndGet();
+            }
+        }
+
+        TrafficReport.TimeBucket snapshot(int targetSecond) {
+            TrafficReport.TimeBucket result = new TrafficReport.TimeBucket();
+            result.second = targetSecond;
+            if (second == targetSecond) {
+                result.c2sBytes = c2sBytes.get();
+                result.s2cBytes = s2cBytes.get();
+                result.c2sPackets = c2sPackets.get();
+                result.s2cPackets = s2cPackets.get();
+            }
+            return result;
+        }
+
+        private void ensureSecond(long targetSecond) {
+            if (second == targetSecond) return;
+            synchronized (this) {
+                if (second == targetSecond) return;
+                c2sBytes.set(0L);
+                s2cBytes.set(0L);
+                c2sPackets.set(0L);
+                s2cPackets.set(0L);
+                second = targetSecond;
+            }
         }
     }
 
