@@ -1,0 +1,22 @@
+{
+  "required": true,
+  "priority": 1001,
+  "package": "com.smd.checkpackagesize.mixin",
+  "compatibilityLevel": "JAVA_8",
+  "target": "@env(DEFAULT)",
+  "mixins": [
+    "MixinNetworkManager",
+    "MixinNettyPacketEncoder",
+    "MixinNettyPacketDecoder",
+    "MixinNettyCompressionEncoder",
+    "MixinNettyCompressionDecoder",
+    "MixinMinecraftServer",
+    "MixinSimpleNetworkWrapper"
+  ],
+  "server": [],
+  "client": [
+    "MixinMinecraft"
+  ],
+  "setSourceFile": true,
+  "minVersion": "0.8.7"
+}
