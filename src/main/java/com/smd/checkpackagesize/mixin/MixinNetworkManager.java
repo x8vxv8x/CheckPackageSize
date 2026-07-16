@@ -35,8 +35,12 @@ public abstract class MixinNetworkManager {
     }
 
     private void checkPackageSize$captureQueued(Packet<?> packet) {
-        if (channel == null || !((NetworkManager) (Object) this).isLocalChannel() || !DiagnosticHooks.isCapturing()) return;
-        EnumConnectionState state = channel.attr(NetworkManager.PROTOCOL_ATTRIBUTE_KEY).get();
-        DiagnosticHooks.onLocalPacket(packet, direction, state);
+        if (channel == null || !DiagnosticHooks.isCapturing()) return;
+        if (((NetworkManager) (Object) this).isLocalChannel()) {
+            EnumConnectionState state = channel.attr(NetworkManager.PROTOCOL_ATTRIBUTE_KEY).get();
+            DiagnosticHooks.onLocalPacket(packet, direction, state);
+        } else {
+            DiagnosticHooks.onRemotePacketQueued(packet, direction);
+        }
     }
 }

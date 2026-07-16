@@ -8,12 +8,14 @@ public class TrafficReport {
     public String mode;
     public long startedAtMillis;
     public long durationMillis;
+    public int traceDepth;
     public boolean localTheoretical;
     public boolean capturing;
     public long droppedMeasurements;
     public int pendingLocalMeasurements;
     public String reportDirectory;
     public List<PacketRow> packets = new ArrayList<>();
+    public List<TraceRow> traces = new ArrayList<>();
     public List<TimeBucket> timeline = new ArrayList<>();
 
     public static class TimeBucket {
@@ -33,6 +35,23 @@ public class TrafficReport {
         public int discriminator = -1;
         public EndpointMetrics client = new EndpointMetrics();
         public EndpointMetrics server = new EndpointMetrics();
+    }
+
+    public static class TraceRow {
+        public String direction;
+        public String pathKey;
+        public String displayClass;
+        public String displayMethod;
+        public int displayLine = -1;
+        public List<String> sampleStack = new ArrayList<>();
+        public String packetModId;
+        public String channel;
+        public String packetClass;
+        public String handlerClass;
+        public int discriminator = -1;
+        public long packetCount;
+        public long encodedBytes;
+        public long transferredBytes;
     }
 
     public static class EndpointMetrics {

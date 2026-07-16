@@ -6,6 +6,7 @@
   "target": "@env(DEFAULT)",
   "mixins": [
     "MixinNetworkManager",
+    "MixinNetworkDispatcher",
     "MixinNettyPacketEncoder",
     "MixinNettyPacketDecoder",
     "MixinNettyCompressionEncoder",

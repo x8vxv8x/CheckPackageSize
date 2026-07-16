@@ -36,6 +36,7 @@ public final class ReportWriter {
 
     private static String html(TrafficReport report) {
         List<ModSummary> mods = summarize(report);
+        List<TracedPacketSummary> tracedPackets = summarizeTraces(report);
         StringBuilder builder = new StringBuilder(16384);
         builder.append("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">")
                 .append("<title>CheckPackageSize 报告</title><style>")
@@ -48,6 +49,7 @@ public final class ReportWriter {
                 .append("</style></head><body><h1>CheckPackageSize 网络诊断报告</h1><div class=\"card\">")
                 .append("模式：").append(escape(report.mode)).append("<br>")
                 .append("采集时长：").append(formatDuration(report.durationMillis)).append("<br>")
+                .append("本端发包调用栈深度：").append(report.traceDepth == 0 ? "关闭" : report.traceDepth + " 层").append("<br>")
                 .append(report.localTheoretical ? "环境：单机联合采集，传输大小为远程压缩估算"
                         : "环境：单端采集，传输大小来自当前端实际压缩阶段")
                 .append("<br>")
@@ -68,7 +70,8 @@ public final class ReportWriter {
                     .append("流量最高：<b>").append(escape(traffic.modId)).append("</b>，")
                     .append(formatBytes(traffic.trafficBytes)).append("。<br>")
                     .append("包数量最高：<b>").append(escape(frequent.modId)).append("</b>，")
-                    .append(frequent.packetCount).append(" 个。")
+                    .append(frequent.packetCount).append(" 个。<br>");
+            builder
                     .append("<p>本报告只统计 Minecraft 应用层流量，不测量编解码、发送队列或主线程处理时间。</p></div>");
         }
 
@@ -95,7 +98,9 @@ public final class ReportWriter {
                     .append("</td><td>").append(formatRatio(mod.encodedBytes, mod.trafficBytes)).append("</td><td><code>")
                     .append(escape(shortName(mod.topPacket))).append("</code></td></tr>");
         }
-        builder.append("</table><h2>具体包</h2>");
+        builder.append("</table>");
+
+        builder.append("<h2>具体包</h2>");
 
         ArrayList<TrafficReport.PacketRow> packets = new ArrayList<>(report.packets);
         packets.sort(Comparator.comparingLong(ReportWriter::trafficBytes).reversed());
@@ -103,6 +108,7 @@ public final class ReportWriter {
             long count = packetCount(row);
             long encoded = encodedBytes(row);
             long transferred = trafficBytes(row);
+            TracedPacketSummary traced = findTrace(tracedPackets, row);
             builder.append("<details><summary><b>").append(escape(row.modId)).append("</b> · ")
                     .append(escape(row.direction)).append(" · <code>").append(escape(row.packetClass)).append("</code> · ")
                     .append(formatBytes(trafficBytes(row))).append("</summary><div class=\"card\">")
@@ -116,7 +122,22 @@ public final class ReportWriter {
                     .append("压缩率：").append(formatRatio(encoded, transferred)).append("<br>")
                     .append(endpointDetail("客户端", row.client))
                     .append(endpointDetail("服务端", row.server))
-                    .append("</div></details>");
+                    .append("<h3>本端发包调用路径</h3>");
+            if (traced == null) {
+                builder.append("<p class=\"warn\">").append(escape(traceUnavailableReason(report, row))).append("</p>");
+            } else {
+                builder.append("<p>已追溯 ").append(traced.packetCount).append(" 包，共 ")
+                        .append(traced.paths.size()).append(" 条完整路径。</p>");
+                traced.paths.sort(Comparator.comparingLong((TracePathSummary value) -> value.packetCount).reversed());
+                for (TracePathSummary path : traced.paths) {
+                    builder.append("<details><summary><code>").append(escape(path.displayName())).append("</code> · ")
+                            .append(path.packetCount).append(" 包 · ").append(formatBytes(path.trafficBytes))
+                            .append("</summary><pre>");
+                    for (String frame : path.sampleStack) builder.append(escape(frame)).append('\n');
+                    builder.append("</pre></details>");
+                }
+            }
+            builder.append("</div></details>");
         }
         return builder.append("</body></html>").toString();
     }
@@ -151,6 +172,30 @@ public final class ReportWriter {
             }
         }
         return new ArrayList<>(result.values());
+    }
+
+    public static List<TracedPacketSummary> summarizeTraces(TrafficReport report) {
+        Map<String, TracedPacketSummary> result = new LinkedHashMap<>();
+        for (TrafficReport.TraceRow row : report.traces) {
+            String key = row.direction + '\0' + row.packetModId + '\0' + row.channel + '\0' + row.packetClass
+                    + '\0' + row.handlerClass + '\0' + row.discriminator;
+            result.computeIfAbsent(key, ignored -> new TracedPacketSummary(row)).add(row);
+        }
+        return new ArrayList<>(result.values());
+    }
+
+    private static TracedPacketSummary findTrace(List<TracedPacketSummary> traces, TrafficReport.PacketRow row) {
+        for (TracedPacketSummary trace : traces) if (trace.matches(row)) return trace;
+        return null;
+    }
+
+    private static String traceUnavailableReason(TrafficReport report, TrafficReport.PacketRow row) {
+        if (report.traceDepth == 0) return "本次采集关闭了调用栈追溯。";
+        if (("CLIENT_ONLY".equals(report.mode) && "S2C".equals(row.direction))
+                || ("SERVER_ONLY".equals(report.mode) && "C2S".equals(row.direction))) {
+            return "该包由远端发出，本端调用栈不可见。";
+        }
+        return "没有捕获到该包的本端发送路径。";
     }
 
     public static long trafficBytes(TrafficReport.PacketRow row) {
@@ -251,6 +296,81 @@ public final class ReportWriter {
 
         private ModSummary(String modId) {
             this.modId = modId;
+        }
+    }
+
+    public static final class TracedPacketSummary {
+        public final String direction;
+        public final String packetModId;
+        public final String channel;
+        public final String packetClass;
+        public final String handlerClass;
+        public final int discriminator;
+        public final List<TracePathSummary> paths = new ArrayList<>();
+        private final Map<String, TracePathSummary> pathIndex = new LinkedHashMap<>();
+        public long trafficBytes;
+        public long encodedBytes;
+        public long packetCount;
+
+        private TracedPacketSummary(TrafficReport.TraceRow row) {
+            direction = row.direction;
+            packetModId = row.packetModId;
+            channel = row.channel;
+            packetClass = row.packetClass;
+            handlerClass = row.handlerClass;
+            discriminator = row.discriminator;
+        }
+
+        private void add(TrafficReport.TraceRow row) {
+            trafficBytes += row.transferredBytes;
+            encodedBytes += row.encodedBytes;
+            packetCount += row.packetCount;
+            TracePathSummary path = pathIndex.computeIfAbsent(row.pathKey, ignored -> {
+                TracePathSummary created = new TracePathSummary(row);
+                paths.add(created);
+                return created;
+            });
+            path.add(row);
+        }
+
+        public String registrationKey() {
+            return direction + '\0' + channel + '\0' + String.format(Locale.ROOT, "%04d", discriminator < 0 ? 1000 : discriminator)
+                    + '\0' + packetClass;
+        }
+
+        public boolean matches(TrafficReport.PacketRow row) {
+            return direction.equals(row.direction) && packetModId.equals(row.modId) && channel.equals(row.channel)
+                    && packetClass.equals(row.packetClass) && handlerClass.equals(row.handlerClass)
+                    && discriminator == row.discriminator;
+        }
+    }
+
+    public static final class TracePathSummary {
+        public final String pathKey;
+        public final String displayClass;
+        public final String displayMethod;
+        public final int displayLine;
+        public final List<String> sampleStack;
+        public long trafficBytes;
+        public long encodedBytes;
+        public long packetCount;
+
+        private TracePathSummary(TrafficReport.TraceRow row) {
+            pathKey = row.pathKey;
+            displayClass = row.displayClass;
+            displayMethod = row.displayMethod;
+            displayLine = row.displayLine;
+            sampleStack = row.sampleStack == null ? List.of() : List.copyOf(row.sampleStack);
+        }
+
+        private void add(TrafficReport.TraceRow row) {
+            trafficBytes += row.transferredBytes;
+            encodedBytes += row.encodedBytes;
+            packetCount += row.packetCount;
+        }
+
+        public String displayName() {
+            return shortName(displayClass) + '.' + displayMethod + (displayLine < 0 ? "" : ":" + displayLine);
         }
     }
 }

@@ -17,6 +17,9 @@ import java.util.concurrent.atomic.LongAdder;
 
 public final class DiagnosticsManager {
 
+    public static final int DEFAULT_TRACE_DEPTH = 16;
+    public static final int MAX_TRACE_DEPTH = 64;
+
     private static final AtomicLong NEXT_ID = new AtomicLong();
     private static final AtomicReference<TrafficReport> COMPLETED = new AtomicReference<>();
     private static final AtomicInteger FINALIZING = new AtomicInteger();
@@ -32,19 +35,22 @@ public final class DiagnosticsManager {
         if (directory != null) gameDirectory = directory;
     }
 
-    public static synchronized boolean startClient(int durationSeconds, boolean singleplayer) {
-        return start(singleplayer ? CaptureMode.SINGLEPLAYER_COMBINED : CaptureMode.CLIENT_ONLY, durationSeconds);
+    public static synchronized boolean startClient(int durationSeconds, int traceDepth, boolean singleplayer) {
+        return start(singleplayer ? CaptureMode.SINGLEPLAYER_COMBINED : CaptureMode.CLIENT_ONLY,
+                durationSeconds, traceDepth);
     }
 
-    public static synchronized boolean startServer(int durationSeconds) {
-        return start(CaptureMode.SERVER_ONLY, durationSeconds);
+    public static synchronized boolean startServer(int durationSeconds, int traceDepth) {
+        return start(CaptureMode.SERVER_ONLY, durationSeconds, traceDepth);
     }
 
-    private static boolean start(CaptureMode mode, int durationSeconds) {
+    private static boolean start(CaptureMode mode, int durationSeconds, int traceDepth) {
         if ((active != null && !active.isFinished()) || FINALIZING.get() > 0) return false;
         int seconds = Math.clamp(durationSeconds, 1, 300);
+        int depth = Math.clamp(traceDepth, 0, MAX_TRACE_DEPTH);
         try {
-            active = new Session(NEXT_ID.incrementAndGet(), mode, seconds, gameDirectory);
+            DiagnosticHooks.resetTransientState();
+            active = new Session(NEXT_ID.incrementAndGet(), mode, seconds, depth, gameDirectory);
             COMPLETED.set(null);
             return true;
         } catch (Exception exception) {
@@ -71,8 +77,9 @@ public final class DiagnosticsManager {
     private static synchronized TrafficReport finishIfReady(Session session, boolean force) {
         if (active != session || (!force && !session.readyToFinish())) return null;
         session.seal();
-        TrafficReport report = session.snapshot();
+        TrafficReport report = session.snapshot(true);
         active = null;
+        DiagnosticHooks.resetTransientState();
         FINALIZING.incrementAndGet();
         REPORT_EXECUTOR.submit(() -> {
             try {
@@ -117,7 +124,7 @@ public final class DiagnosticsManager {
 
     public static TrafficReport getLiveReport() {
         Session session = active;
-        return session == null ? null : session.snapshot();
+        return session == null ? null : session.snapshot(false);
     }
 
     public static TrafficReport pollCompleted() {
@@ -135,8 +142,10 @@ public final class DiagnosticsManager {
         final long startMillis;
         final long startNanos;
         final long durationNanos;
+        final int traceDepth;
         final File reportDirectory;
         final ConcurrentMap<PacketIdentity, MutablePacket> packets = new ConcurrentHashMap<>();
+        final ConcurrentMap<PacketTraceKey, MutableTracePacket> traces = new ConcurrentHashMap<>();
         final ConcurrentMap<Channel, PendingPacketQueue> outboundCompression = new ConcurrentHashMap<>();
         final ConcurrentMap<Channel, LongQueue> inboundCompression = new ConcurrentHashMap<>();
         final AtomicInteger pendingAsync = new AtomicInteger();
@@ -146,12 +155,13 @@ public final class DiagnosticsManager {
         volatile boolean sealed;
         volatile long stopRequestedNanos;
 
-        Session(long id, CaptureMode mode, int durationSeconds, File gameDirectory) throws Exception {
+        Session(long id, CaptureMode mode, int durationSeconds, int traceDepth, File gameDirectory) {
             this.id = id;
             this.mode = mode;
             this.startMillis = System.currentTimeMillis();
             this.startNanos = System.nanoTime();
             this.durationNanos = durationSeconds * 1_000_000_000L;
+            this.traceDepth = traceDepth;
             this.reportDirectory = ReportWriter.createSessionDirectory(gameDirectory, startMillis, id);
             for (int index = 0; index < timeline.length; index++) timeline[index] = new TimeBucket();
         }
@@ -193,10 +203,12 @@ public final class DiagnosticsManager {
             return packets.computeIfAbsent(identity, MutablePacket::new);
         }
 
-        void recordSentWire(Endpoint endpoint, PacketIdentity identity, long encodedBytes, long transferredBytes) {
+        void recordSentWire(Endpoint endpoint, PacketIdentity identity, CallerTrace trace,
+                            long encodedBytes, long transferredBytes) {
             MutableEndpoint metrics = packet(identity).endpoint(endpoint);
             metrics.encodedBytes.add(encodedBytes);
             metrics.transferredBytes.add(transferredBytes);
+            recordTraceWire(trace, identity, encodedBytes, transferredBytes);
             recordTimeline(identity.direction(), transferredBytes);
         }
 
@@ -207,11 +219,12 @@ public final class DiagnosticsManager {
             recordTimeline(identity.direction(), transferredBytes);
         }
 
-        void recordLocalWire(Endpoint sender, PacketIdentity identity, long encodedBytes, long transferredBytes,
-                             long timelineSecond) {
+        void recordLocalWire(Endpoint sender, PacketIdentity identity, CallerTrace trace, long encodedBytes,
+                             long transferredBytes, long timelineSecond) {
             MutableEndpoint sent = packet(identity).endpoint(sender);
             sent.encodedBytes.add(encodedBytes);
             sent.transferredBytes.add(transferredBytes);
+            recordTraceWire(trace, identity, encodedBytes, transferredBytes);
             recordTimeline(timelineSecond, identity.direction(), transferredBytes);
             Endpoint receiver = sender == Endpoint.CLIENT ? Endpoint.SERVER : Endpoint.CLIENT;
             MutableEndpoint received = packet(identity).endpoint(receiver);
@@ -220,13 +233,31 @@ public final class DiagnosticsManager {
             received.transferredBytes.add(transferredBytes);
         }
 
-        TrafficReport snapshot() {
+        void recordTraceSent(CallerTrace trace, PacketIdentity identity) {
+            if (trace != null) trace(trace, identity).packetCount.increment();
+        }
+
+        private void recordTraceWire(CallerTrace trace, PacketIdentity identity,
+                                     long encodedBytes, long transferredBytes) {
+            if (trace == null) return;
+            MutableTracePacket path = trace(trace, identity);
+            path.encodedBytes.add(encodedBytes);
+            path.transferredBytes.add(transferredBytes);
+        }
+
+        private MutableTracePacket trace(CallerTrace trace, PacketIdentity identity) {
+            PacketTraceKey key = new PacketTraceKey(identity, trace.pathKey());
+            return traces.computeIfAbsent(key, ignored -> new MutableTracePacket(key, trace));
+        }
+
+        TrafficReport snapshot(boolean includeTraces) {
             TrafficReport report = new TrafficReport();
             report.sessionId = id;
             report.mode = mode.name();
             report.startedAtMillis = startMillis;
             long endNanos = stopRequestedNanos == 0L ? System.nanoTime() : stopRequestedNanos;
             report.durationMillis = Math.clamp(endNanos - startNanos, 0L, durationNanos) / 1_000_000L;
+            report.traceDepth = traceDepth;
             report.localTheoretical = mode.localTheoretical();
             report.capturing = accepting;
             report.reportDirectory = reportDirectory.getAbsolutePath();
@@ -236,6 +267,14 @@ public final class DiagnosticsManager {
             sorted.sort(Comparator.comparing(value -> value.identity.modId() + value.identity.packetClass() + value.identity.direction()));
             for (MutablePacket packet : sorted) {
                 if (!"checkpackagesize".equals(packet.identity.modId())) report.packets.add(packet.snapshot());
+            }
+            if (includeTraces) {
+                ArrayList<MutableTracePacket> sortedTraces = new ArrayList<>(traces.values());
+                sortedTraces.sort(Comparator.comparing(value -> value.key.identity.modId()
+                        + value.key.identity.packetClass() + value.key.pathKey));
+                for (MutableTracePacket trace : sortedTraces) {
+                    if (!"checkpackagesize".equals(trace.key.identity.modId())) report.traces.add(trace.snapshot());
+                }
             }
             snapshotTimeline(report);
             return report;
@@ -264,6 +303,46 @@ public final class DiagnosticsManager {
             return (elapsed - 1L) / 1_000_000_000L;
         }
 
+    }
+
+    public static int getTraceDepth() {
+        Session session = active;
+        return session == null ? 0 : session.traceDepth;
+    }
+
+    private record PacketTraceKey(PacketIdentity identity, String pathKey) { }
+
+    static final class MutableTracePacket {
+        final PacketTraceKey key;
+        final CallerTrace sample;
+        final LongAdder packetCount = new LongAdder();
+        final LongAdder encodedBytes = new LongAdder();
+        final LongAdder transferredBytes = new LongAdder();
+
+        MutableTracePacket(PacketTraceKey key, CallerTrace sample) {
+            this.key = key;
+            this.sample = sample;
+        }
+
+        TrafficReport.TraceRow snapshot() {
+            PacketIdentity identity = key.identity;
+            TrafficReport.TraceRow row = new TrafficReport.TraceRow();
+            row.direction = identity.direction();
+            row.pathKey = key.pathKey;
+            row.displayClass = sample.displayClass();
+            row.displayMethod = sample.displayMethod();
+            row.displayLine = sample.displayLine();
+            row.sampleStack.addAll(sample.frames());
+            row.packetModId = identity.modId();
+            row.channel = identity.channel();
+            row.packetClass = identity.packetClass();
+            row.handlerClass = identity.handlerClass();
+            row.discriminator = identity.discriminator();
+            row.packetCount = packetCount.sum();
+            row.encodedBytes = encodedBytes.sum();
+            row.transferredBytes = transferredBytes.sum();
+            return row;
+        }
     }
 
     static final class MutablePacket {
@@ -352,15 +431,17 @@ public final class DiagnosticsManager {
     static final class PendingPacketQueue {
         private PacketIdentity[] identities = new PacketIdentity[16];
         private Endpoint[] endpoints = new Endpoint[16];
+        private CallerTrace[] traces = new CallerTrace[16];
         private long[] encodedBytes = new long[16];
         private int head;
         private int size;
 
-        void add(PacketIdentity identity, Endpoint endpoint, long bytes) {
+        void add(PacketIdentity identity, Endpoint endpoint, CallerTrace trace, long bytes) {
             ensureCapacity();
             int tail = (head + size) % identities.length;
             identities[tail] = identity;
             endpoints[tail] = endpoint;
+            traces[tail] = trace;
             encodedBytes[tail] = bytes;
             size++;
         }
@@ -368,11 +449,13 @@ public final class DiagnosticsManager {
         boolean isEmpty() { return size == 0; }
         PacketIdentity identity() { return identities[head]; }
         Endpoint endpoint() { return endpoints[head]; }
+        CallerTrace trace() { return traces[head]; }
         long encodedBytes() { return encodedBytes[head]; }
 
         void remove() {
             identities[head] = null;
             endpoints[head] = null;
+            traces[head] = null;
             head = (head + 1) % identities.length;
             size--;
         }
@@ -382,15 +465,18 @@ public final class DiagnosticsManager {
             int nextCapacity = identities.length << 1;
             PacketIdentity[] nextIdentities = new PacketIdentity[nextCapacity];
             Endpoint[] nextEndpoints = new Endpoint[nextCapacity];
+            CallerTrace[] nextTraces = new CallerTrace[nextCapacity];
             long[] nextBytes = new long[nextCapacity];
             for (int index = 0; index < size; index++) {
                 int source = (head + index) % identities.length;
                 nextIdentities[index] = identities[source];
                 nextEndpoints[index] = endpoints[source];
+                nextTraces[index] = traces[source];
                 nextBytes[index] = encodedBytes[source];
             }
             identities = nextIdentities;
             endpoints = nextEndpoints;
+            traces = nextTraces;
             encodedBytes = nextBytes;
             head = 0;
         }

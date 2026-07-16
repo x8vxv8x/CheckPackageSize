@@ -39,6 +39,7 @@ public final class DiagnosticsScreen extends GuiScreen {
 
     private final List<HitBox> hitBoxes = new ArrayList<>();
     private int durationSeconds = 30;
+    private int traceDepth = DiagnosticsManager.DEFAULT_TRACE_DEPTH;
     private Page page = Page.OVERVIEW;
     private Sort sort = Sort.TRAFFIC;
     private int scrollOffset;
@@ -47,8 +48,9 @@ public final class DiagnosticsScreen extends GuiScreen {
     private boolean includeS2c = true;
     private boolean livePaused;
     private String selectedMod;
-    private TrafficReport.PacketRow selectedPacket;
     private GuiTextField searchField;
+    private GuiTextField durationField;
+    private GuiTextField traceDepthField;
     private String searchText = "";
     private String statusMessage = "";
     private TrafficReport liveSnapshot;
@@ -56,6 +58,7 @@ public final class DiagnosticsScreen extends GuiScreen {
     private TrafficReport cachedReport;
     private Totals cachedTotals;
     private List<ReportWriter.ModSummary> cachedMods = List.of();
+    private List<ReportWriter.TracedPacketSummary> cachedTracedPackets = List.of();
     private List<ReportWriter.ModSummary> cachedFilteredMods = List.of();
     private List<TrafficReport.PacketRow> cachedFilteredPackets = List.of();
     private boolean filtersDirty = true;
@@ -68,11 +71,18 @@ public final class DiagnosticsScreen extends GuiScreen {
         searchField.setMaxStringLength(96);
         searchField.setText(searchText);
         searchField.setEnableBackgroundDrawing(true);
+        int panelWidth = Math.min(580, width - 32);
+        int left = (width - panelWidth) / 2;
+        int top = 52;
+        durationField = numericField(2, left + 20, top + 165, 108, Integer.toString(durationSeconds));
+        traceDepthField = numericField(3, left + 20, top + 215, 108, Integer.toString(traceDepth));
     }
 
     @Override
     public void updateScreen() {
         if (searchField != null) searchField.updateCursorCounter();
+        if (durationField != null) durationField.updateCursorCounter();
+        if (traceDepthField != null) traceDepthField.updateCursorCounter();
         if (DiagnosticsManager.isCapturing() && !livePaused && System.currentTimeMillis() >= nextLiveSnapshotMillis) {
             liveSnapshot = DiagnosticsManager.getLiveReport();
             nextLiveSnapshotMillis = System.currentTimeMillis() + 500L;
@@ -117,11 +127,11 @@ public final class DiagnosticsScreen extends GuiScreen {
         int panelWidth = Math.min(580, width - 32);
         int left = (width - panelWidth) / 2;
         int top = 52;
-        int bottom = Math.min(height - 18, top + 310);
+        int bottom = Math.min(height - 18, top + 350);
         drawPanel(left, top, panelWidth, bottom - top);
 
         drawString(fontRenderer, "开始一次流量采集", left + 20, top + 18, TEXT);
-        drawString(fontRenderer, "在游戏中复现问题，采集结束后按 Mod 和包类型定位流量来源。", left + 20, top + 38, MUTED);
+        drawString(fontRenderer, "按包定义和本端发包调用来源定位网络流量。", left + 20, top + 38, MUTED);
 
         boolean local = Minecraft.getMinecraft().isSingleplayer();
         drawSectionLabel(left + 20, top + 68, "采集环境");
@@ -131,23 +141,22 @@ public final class DiagnosticsScreen extends GuiScreen {
                 left + 32, top + 112, local ? WARN : GOOD);
 
         drawSectionLabel(left + 20, top + 148, "持续时间");
-        int buttonY = top + 165;
-        drawButton(left + 20, buttonY, 84, 24, "10 秒", Action.DURATION, 10, mouseX, mouseY,
-                durationSeconds == 10, ACCENT);
-        drawButton(left + 112, buttonY, 84, 24, "30 秒", Action.DURATION, 30, mouseX, mouseY,
-                durationSeconds == 30, ACCENT);
-        drawButton(left + 204, buttonY, 84, 24, "60 秒", Action.DURATION, 60, mouseX, mouseY,
-                durationSeconds == 60, ACCENT);
+        durationField.drawTextBox();
+        drawString(fontRenderer, "秒（1–300）", left + 138, top + 172, MUTED);
 
-        int warningY = top + 210;
+        drawSectionLabel(left + 20, top + 198, "本端发包调用栈深度");
+        traceDepthField.drawTextBox();
+        drawString(fontRenderer, "层（0 关闭，最大 64）", left + 138, top + 222, MUTED);
+
+        int warningY = top + 252;
         if (local) {
-            drawString(fontRenderer, "注意：单机会为计算远程理论流量重新编码包，建议只做短时间复现。",
+            drawString(fontRenderer, "单机可追溯客户端与整合服务端；深栈采集会增加开销。",
                     left + 20, warningY, WARN);
         } else {
-            drawString(fontRenderer, "只采集当前客户端可见数据，不向服务器发送控制消息。", left + 20, warningY, MUTED);
+            drawString(fontRenderer, "远程客户端只追溯本端 C2S；S2C 的服务端调用栈不可见。", left + 20, warningY, MUTED);
         }
 
-        drawButton(left + 20, top + 245, panelWidth - 40, 34, "开始采集", Action.START, null,
+        drawButton(left + 20, top + 282, panelWidth - 40, 34, "开始采集", Action.START, null,
                 mouseX, mouseY, false, ACCENT);
         if (!statusMessage.isEmpty()) drawCenteredString(fontRenderer, statusMessage, width / 2, bottom - 18, DANGER);
     }
@@ -287,14 +296,15 @@ public final class DiagnosticsScreen extends GuiScreen {
 
     private void drawExplorer(TrafficReport report, int mouseX, int mouseY) {
         searchField.drawTextBox();
-        if (searchText.isEmpty() && !searchField.isFocused()) drawString(fontRenderer, "搜索 Mod、频道、类名或 Handler…", 21, 78, MUTED);
+        if (searchText.isEmpty() && !searchField.isFocused())
+            drawString(fontRenderer, "搜索 Mod、频道、类名、Handler 或调用栈…", 21, 78, MUTED);
         drawButton(width - 402, 71, 58, 20, "C2S", Action.TOGGLE_C2S, null, mouseX, mouseY, includeC2s, C2S);
         drawButton(width - 338, 71, 58, 20, "S2C", Action.TOGGLE_S2C, null, mouseX, mouseY, includeS2c, S2C);
         drawButton(width - 274, 71, 72, 20, "按流量", Action.SORT, Sort.TRAFFIC, mouseX, mouseY, sort == Sort.TRAFFIC, ACCENT);
         drawButton(width - 196, 71, 72, 20, "按次数", Action.SORT, Sort.COUNT, mouseX, mouseY, sort == Sort.COUNT, ACCENT);
         drawButton(width - 118, 71, 102, 20, "按名称", Action.SORT, Sort.NAME, mouseX, mouseY, sort == Sort.NAME, ACCENT);
 
-        int detailWidth = selectedMod != null || selectedPacket != null ? Math.clamp(width / 3, 220, 280) : 0;
+        int detailWidth = selectedMod != null ? Math.clamp(width / 3, 220, 280) : 0;
         int tableX = 16;
         int tableY = 99;
         int tableW = width - 32 - (detailWidth == 0 ? 0 : detailWidth + 8);
@@ -332,26 +342,26 @@ public final class DiagnosticsScreen extends GuiScreen {
 
     private void drawPacketTable(TrafficReport report, int x, int y, int w, int h, int mouseX, int mouseY) {
         List<TrafficReport.PacketRow> rows = filteredPackets(report);
-        drawTableHeader(x, y, w, "方向 / 包类型", "Wire", "包数", "Frame", "平均");
+        drawTableHeader(x, y, w, "方向 / 包类型", "Wire", "包数", "路径", "平均");
         int visibleRows = Math.max(1, (h - 42) / 18);
         scrollOffset = clamp(scrollOffset, 0, Math.max(0, rows.size() - visibleRows));
         int rowY = y + 25;
         for (int index = scrollOffset; index < Math.min(rows.size(), scrollOffset + visibleRows); index++) {
             TrafficReport.PacketRow row = rows.get(index);
-            boolean selected = row == selectedPacket;
-            if (selected || inside(mouseX, mouseY, x + 2, rowY - 3, w - 4, 17))
-                drawRect(x + 2, rowY - 3, x + w - 2, rowY + 13, selected ? 0xFF264256 : PANEL_ALT);
+            if (inside(mouseX, mouseY, x + 2, rowY - 3, w - 4, 17))
+                drawRect(x + 2, rowY - 3, x + w - 2, rowY + 13, PANEL_ALT);
             long wire = ReportWriter.trafficBytes(row);
             long count = ReportWriter.packetCount(row);
-            long frame = ReportWriter.encodedBytes(row);
+            ReportWriter.TracedPacketSummary trace = traceFor(row);
             String name = simpleName(row.packetClass);
             drawString(fontRenderer, row.direction, x + 8, rowY, "C2S".equals(row.direction) ? C2S : S2C);
-            drawString(fontRenderer, trim(name, Math.max(70, w * 34 / 100)), x + 35, rowY, selected ? ACCENT : TEXT);
+            drawString(fontRenderer, trim(name, Math.max(70, w * 34 / 100)), x + 35, rowY, TEXT);
             drawRight(ReportWriter.formatBytes(wire), x + w * 58 / 100, rowY, TEXT);
             drawRight(Long.toString(count), x + w * 72 / 100, rowY, MUTED);
-            drawRight(ReportWriter.formatBytes(frame), x + w * 87 / 100, rowY, MUTED);
+            drawRight(traceLabel(report, row, trace), x + w * 87 / 100, rowY,
+                    trace == null ? MUTED : ACCENT);
             drawRight(ReportWriter.formatBytes(count == 0 ? 0 : wire / count), x + w - 8, rowY, MUTED);
-            hitBoxes.add(new HitBox(x + 2, rowY - 3, x + w - 2, rowY + 13, Action.SELECT_PACKET, row));
+            hitBoxes.add(new HitBox(x + 2, rowY - 3, x + w - 2, rowY + 13, Action.OPEN_PACKET, row));
             rowY += 18;
         }
         drawRowCount(x, y, w, h, rows.size());
@@ -361,40 +371,22 @@ public final class DiagnosticsScreen extends GuiScreen {
         drawPanel(x, y, w, h);
         drawString(fontRenderer, "检查器", x + 10, y + 10, TEXT);
         drawButton(x + w - 28, y + 5, 20, 18, "×", Action.CLEAR_SELECTION, null, mouseX, mouseY, false, MUTED);
+        if (selectedMod == null) return;
+
         int line = y + 34;
-        if (selectedPacket != null) {
-            TrafficReport.PacketRow row = selectedPacket;
-            drawDetailLine(x, w, line, "方向", row.direction, "C2S".equals(row.direction) ? C2S : S2C); line += 20;
-            drawDetailLine(x, w, line, "Mod", row.modId, TEXT); line += 20;
-            drawWrappedValue(x, w, line, "消息类", row.packetClass); line += 38;
-            drawWrappedValue(x, w, line, "Channel", row.channel); line += 38;
-            drawDetailLine(x, w, line, "Discriminator", row.discriminator < 0 ? "-" : Integer.toString(row.discriminator), TEXT); line += 20;
-            drawWrappedValue(x, w, line, "Handler", row.handlerClass); line += 38;
-            long wire = ReportWriter.trafficBytes(row);
-            long frame = ReportWriter.encodedBytes(row);
-            long count = ReportWriter.packetCount(row);
-            drawDetailLine(x, w, line, "Wire", ReportWriter.formatBytes(wire), ACCENT); line += 20;
-            drawDetailLine(x, w, line, "Frame", ReportWriter.formatBytes(frame), TEXT); line += 20;
-            drawDetailLine(x, w, line, "包数", Long.toString(count), TEXT); line += 20;
-            drawDetailLine(x, w, line, "平均", ReportWriter.formatBytes(count == 0 ? 0 : wire / count), TEXT); line += 20;
-            drawDetailLine(x, w, line, "压缩后占比", ReportWriter.formatRatio(frame, wire), TEXT); line += 28;
-            drawButton(x + 10, line, w - 20, 22, "复制完整类名", Action.COPY_CLASS, row.packetClass,
-                    mouseX, mouseY, false, MUTED);
-        } else if (selectedMod != null) {
-            ensureCache(report);
-            List<ReportWriter.ModSummary> mods = cachedMods;
-            ReportWriter.ModSummary selected = null;
-            for (ReportWriter.ModSummary mod : mods) if (mod.modId.equals(selectedMod)) selected = mod;
-            if (selected == null) return;
-            drawWrappedValue(x, w, line, "Mod", selected.modId); line += 38;
-            drawDetailLine(x, w, line, "Wire", ReportWriter.formatBytes(selected.trafficBytes), ACCENT); line += 20;
-            drawDetailLine(x, w, line, "C2S", ReportWriter.formatBytes(selected.c2sBytes), C2S); line += 20;
-            drawDetailLine(x, w, line, "S2C", ReportWriter.formatBytes(selected.s2cBytes), S2C); line += 20;
-            drawDetailLine(x, w, line, "包数", Long.toString(selected.packetCount), TEXT); line += 20;
-            drawDetailLine(x, w, line, "Frame", ReportWriter.formatBytes(selected.encodedBytes), TEXT); line += 20;
-            drawDetailLine(x, w, line, "压缩后占比", ReportWriter.formatRatio(selected.encodedBytes, selected.trafficBytes), TEXT); line += 20;
-            drawWrappedValue(x, w, line + 8, "主要包", simpleName(selected.topPacket));
-        }
+        ensureCache(report);
+        ReportWriter.ModSummary selected = null;
+        for (ReportWriter.ModSummary mod : cachedMods) if (mod.modId.equals(selectedMod)) selected = mod;
+        if (selected == null) return;
+        drawWrappedValue(x, w, line, "Mod", selected.modId); line += 38;
+        drawDetailLine(x, w, line, "Wire", ReportWriter.formatBytes(selected.trafficBytes), ACCENT); line += 20;
+        drawDetailLine(x, w, line, "C2S", ReportWriter.formatBytes(selected.c2sBytes), C2S); line += 20;
+        drawDetailLine(x, w, line, "S2C", ReportWriter.formatBytes(selected.s2cBytes), S2C); line += 20;
+        drawDetailLine(x, w, line, "包数", Long.toString(selected.packetCount), TEXT); line += 20;
+        drawDetailLine(x, w, line, "Frame", ReportWriter.formatBytes(selected.encodedBytes), TEXT); line += 20;
+        drawDetailLine(x, w, line, "压缩后占比",
+                ReportWriter.formatRatio(selected.encodedBytes, selected.trafficBytes), TEXT); line += 20;
+        drawWrappedValue(x, w, line + 8, "主要包", simpleName(selected.topPacket));
     }
 
     private List<ReportWriter.ModSummary> filteredMods(TrafficReport report) {
@@ -410,7 +402,8 @@ public final class DiagnosticsScreen extends GuiScreen {
                 || (!query.isEmpty() && !row.modId.toLowerCase(Locale.ROOT).contains(query)));
         Comparator<ReportWriter.ModSummary> modComparator;
         if (sort == Sort.NAME) modComparator = Comparator.comparing(row -> row.modId);
-        else if (sort == Sort.COUNT) modComparator = Comparator.comparingLong(this::visiblePackets).reversed();
+        else if (sort == Sort.COUNT) modComparator = Comparator.comparingLong(
+                this::visiblePackets).reversed();
         else modComparator = Comparator.comparingLong((ReportWriter.ModSummary row) -> visibleBytes(row.c2sBytes, row.s2cBytes)).reversed();
         rows.sort(modComparator);
         cachedFilteredMods = rows;
@@ -418,9 +411,14 @@ public final class DiagnosticsScreen extends GuiScreen {
         List<TrafficReport.PacketRow> packets = new ArrayList<>();
         for (TrafficReport.PacketRow row : report.packets) {
             if ((!includeC2s && "C2S".equals(row.direction)) || (!includeS2c && "S2C".equals(row.direction))) continue;
-            String searchable = row.modId + ' ' + row.channel + ' ' + row.packetClass + ' ' + row.handlerClass
-                    + ' ' + row.discriminator;
-            if (!query.isEmpty() && !searchable.toLowerCase(Locale.ROOT).contains(query)) continue;
+            StringBuilder searchable = new StringBuilder(row.modId).append(' ').append(row.channel).append(' ')
+                    .append(row.packetClass).append(' ').append(row.handlerClass).append(' ').append(row.discriminator);
+            ReportWriter.TracedPacketSummary trace = traceFor(row);
+            if (trace != null) for (ReportWriter.TracePathSummary path : trace.paths) {
+                searchable.append(' ').append(path.displayClass).append(' ').append(path.displayMethod);
+                for (String frame : path.sampleStack) searchable.append(' ').append(frame);
+            }
+            if (!query.isEmpty() && !searchable.toString().toLowerCase(Locale.ROOT).contains(query)) continue;
             packets.add(row);
         }
         Comparator<TrafficReport.PacketRow> packetComparator;
@@ -429,6 +427,7 @@ public final class DiagnosticsScreen extends GuiScreen {
         else packetComparator = Comparator.comparingLong(ReportWriter::trafficBytes).reversed();
         packets.sort(packetComparator);
         cachedFilteredPackets = packets;
+
         filtersDirty = false;
     }
 
@@ -490,6 +489,15 @@ public final class DiagnosticsScreen extends GuiScreen {
         hitBoxes.add(new HitBox(x, y, x + w, y + h, action, payload));
     }
 
+    private GuiTextField numericField(int id, int x, int y, int w, String value) {
+        GuiTextField field = new GuiTextField(id, fontRenderer, x, y, w, 22);
+        field.setMaxStringLength(3);
+        field.setText(value);
+        field.setEnableBackgroundDrawing(true);
+        field.setValidator(text -> text.isEmpty() || text.chars().allMatch(Character::isDigit));
+        return field;
+    }
+
     private Totals totals(TrafficReport report) {
         ensureCache(report);
         return cachedTotals;
@@ -502,6 +510,9 @@ public final class DiagnosticsScreen extends GuiScreen {
         List<ReportWriter.ModSummary> mods = ReportWriter.summarize(report);
         mods.sort(Comparator.comparingLong((ReportWriter.ModSummary value) -> value.trafficBytes).reversed());
         cachedMods = mods;
+        List<ReportWriter.TracedPacketSummary> tracedPackets = ReportWriter.summarizeTraces(report);
+        tracedPackets.sort(Comparator.comparing(ReportWriter.TracedPacketSummary::registrationKey));
+        cachedTracedPackets = tracedPackets;
         filtersDirty = true;
     }
 
@@ -547,6 +558,20 @@ public final class DiagnosticsScreen extends GuiScreen {
         return (includeC2s ? row.c2sPackets : 0L) + (includeS2c ? row.s2cPackets : 0L);
     }
 
+    private ReportWriter.TracedPacketSummary traceFor(TrafficReport.PacketRow row) {
+        for (ReportWriter.TracedPacketSummary trace : cachedTracedPackets) if (trace.matches(row)) return trace;
+        return null;
+    }
+
+    private String traceLabel(TrafficReport report, TrafficReport.PacketRow row,
+                              ReportWriter.TracedPacketSummary trace) {
+        if (trace != null) return Integer.toString(trace.paths.size());
+        if (report.traceDepth == 0) return "关闭";
+        if (("CLIENT_ONLY".equals(report.mode) && "S2C".equals(row.direction))
+                || ("SERVER_ONLY".equals(report.mode) && "C2S".equals(row.direction))) return "远端";
+        return "0";
+    }
+
     private String trim(String value, int pixels) {
         if (value == null) return "-";
         return fontRenderer.trimStringToWidth(value, Math.max(8, pixels));
@@ -577,7 +602,10 @@ public final class DiagnosticsScreen extends GuiScreen {
 
     @Override
     protected void mouseClicked(int mouseX, int mouseY, int mouseButton) throws IOException {
-        if (searchField != null) searchField.mouseClicked(mouseX, mouseY, mouseButton);
+        boolean setupVisible = showSetup || DiagnosticsManager.getLastReport() == null;
+        if (!setupVisible && searchField != null) searchField.mouseClicked(mouseX, mouseY, mouseButton);
+        if (setupVisible && durationField != null) durationField.mouseClicked(mouseX, mouseY, mouseButton);
+        if (setupVisible && traceDepthField != null) traceDepthField.mouseClicked(mouseX, mouseY, mouseButton);
         if (mouseButton == 0) {
             for (int index = hitBoxes.size() - 1; index >= 0; index--) {
                 HitBox hit = hitBoxes.get(index);
@@ -593,18 +621,24 @@ public final class DiagnosticsScreen extends GuiScreen {
     @Override
     protected void keyTyped(char typedChar, int keyCode) throws IOException {
         if (keyCode == Keyboard.KEY_ESCAPE) {
-            if (selectedMod != null || selectedPacket != null) {
+            if (selectedMod != null) {
                 clearSelection();
                 return;
             }
             mc.displayGuiScreen(null);
             return;
         }
-        if (searchField != null && searchField.isFocused() && searchField.textboxKeyTyped(typedChar, keyCode)) {
+        boolean setupVisible = showSetup || DiagnosticsManager.getLastReport() == null;
+        if (!setupVisible && searchField != null && searchField.isFocused()
+                && searchField.textboxKeyTyped(typedChar, keyCode)) {
             searchText = searchField.getText();
             invalidateFilters();
             return;
         }
+        if (setupVisible && durationField != null && durationField.isFocused()
+                && durationField.textboxKeyTyped(typedChar, keyCode)) return;
+        if (setupVisible && traceDepthField != null && traceDepthField.isFocused()
+                && traceDepthField.textboxKeyTyped(typedChar, keyCode)) return;
         if (keyCode == Keyboard.KEY_F && isCtrlKeyDown() && searchField != null) searchField.setFocused(true);
         else super.keyTyped(typedChar, keyCode);
     }
@@ -625,10 +659,16 @@ public final class DiagnosticsScreen extends GuiScreen {
                 showSetup = true;
                 clearSelection();
             }
-            case DURATION -> durationSeconds = (Integer) payload;
             case START -> {
+                Integer parsedDuration = parseSetting(durationField, 1, 300, "采集时长必须是 1–300 秒");
+                if (parsedDuration == null) return;
+                Integer parsedDepth = parseSetting(traceDepthField, 0, DiagnosticsManager.MAX_TRACE_DEPTH,
+                        "调用栈深度必须是 0–64");
+                if (parsedDepth == null) return;
+                durationSeconds = parsedDuration;
+                traceDepth = parsedDepth;
                 boolean local = Minecraft.getMinecraft().isSingleplayer();
-                if (DiagnosticsManager.startClient(durationSeconds, local)) {
+                if (DiagnosticsManager.startClient(durationSeconds, traceDepth, local)) {
                     statusMessage = "";
                     liveSnapshot = null;
                     livePaused = false;
@@ -656,16 +696,12 @@ public final class DiagnosticsScreen extends GuiScreen {
                 sort = (Sort) payload;
                 invalidateFilters();
             }
-            case SELECT_MOD -> {
-                selectedMod = (String) payload;
-                selectedPacket = null;
-            }
-            case SELECT_PACKET -> {
-                selectedPacket = (TrafficReport.PacketRow) payload;
-                selectedMod = null;
+            case SELECT_MOD -> selectedMod = (String) payload;
+            case OPEN_PACKET -> {
+                TrafficReport.PacketRow packet = (TrafficReport.PacketRow) payload;
+                mc.displayGuiScreen(new PacketDetailsScreen(this, cachedReport, packet, traceFor(packet)));
             }
             case CLEAR_SELECTION -> clearSelection();
-            case COPY_CLASS -> setClipboardString((String) payload);
             case OPEN_REPORT -> openReport(false);
             case OPEN_DIRECTORY -> openReport(true);
         }
@@ -673,7 +709,18 @@ public final class DiagnosticsScreen extends GuiScreen {
 
     private void clearSelection() {
         selectedMod = null;
-        selectedPacket = null;
+    }
+
+    private Integer parseSetting(GuiTextField field, int minimum, int maximum, String error) {
+        try {
+            int value = Integer.parseInt(field.getText());
+            if (value < minimum || value > maximum) throw new NumberFormatException();
+            return value;
+        } catch (NumberFormatException ignored) {
+            statusMessage = error;
+            field.setFocused(true);
+            return null;
+        }
     }
 
     private void openReport(boolean directory) {
@@ -695,8 +742,8 @@ public final class DiagnosticsScreen extends GuiScreen {
     private enum Page { OVERVIEW, MODS, PACKETS }
     private enum Sort { TRAFFIC, COUNT, NAME }
     private enum Action {
-        CLOSE, SETUP, DURATION, START, STOP, PAUSE, PAGE, TOGGLE_C2S, TOGGLE_S2C, SORT,
-        SELECT_MOD, SELECT_PACKET, CLEAR_SELECTION, COPY_CLASS, OPEN_REPORT, OPEN_DIRECTORY
+        CLOSE, SETUP, START, STOP, PAUSE, PAGE, TOGGLE_C2S, TOGGLE_S2C, SORT,
+        SELECT_MOD, OPEN_PACKET, CLEAR_SELECTION, OPEN_REPORT, OPEN_DIRECTORY
     }
 
     private record HitBox(int left, int top, int right, int bottom, Action action, Object payload) { }
